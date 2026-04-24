@@ -1,0 +1,702 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  name         String?
+  operatorCompanyId String? @map("operator_company_id")
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  operatorCompany OperatorCompany? @relation(fields: [operatorCompanyId], references: [id])
+  userRoles    UserRole[]
+  warehouseMappings UserWarehouse[]
+
+  @@index([isActive])
+  @@index([operatorCompanyId])
+  @@map("users")
+}
+
+enum RoleScope {
+  SYSTEM
+  OPERATIONAL
+}
+
+model Role {
+  id          String     @id @default(uuid())
+  code        String     @unique
+  name        String
+  scope       RoleScope  @default(OPERATIONAL)
+  isActive    Boolean    @default(true) @map("is_active")
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+  userRoles   UserRole[]
+  roleMenus   RoleMenu[]
+
+  @@index([isActive])
+  @@map("roles")
+}
+
+model Menu {
+  id          String     @id @default(uuid())
+  code        String     @unique
+  name        String
+  path        String?
+  icon        String?
+  sortOrder   Int        @default(0) @map("sort_order")
+  parentId    String?    @map("parent_id")
+  isActive    Boolean    @default(true) @map("is_active")
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+  parent      Menu?      @relation("MenuHierarchy", fields: [parentId], references: [id])
+  children    Menu[]     @relation("MenuHierarchy")
+  roleMenus   RoleMenu[]
+
+  @@index([parentId, sortOrder])
+  @@index([isActive])
+  @@map("menus")
+}
+
+model UserRole {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  roleId    String   @map("role_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id])
+  role      Role     @relation(fields: [roleId], references: [id])
+
+  @@unique([userId, roleId])
+  @@index([roleId])
+  @@map("user_roles")
+}
+
+model RoleMenu {
+  id        String   @id @default(uuid())
+  roleId    String   @map("role_id")
+  menuId    String   @map("menu_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  role      Role     @relation(fields: [roleId], references: [id])
+  menu      Menu     @relation(fields: [menuId], references: [id])
+
+  @@unique([roleId, menuId])
+  @@index([menuId])
+  @@map("role_menus")
+}
+
+enum CustomerType {
+  SHARED
+  DEDICATED
+}
+
+enum WarehouseType {
+  SHARED
+  DEDICATED
+}
+
+enum InboundAsnStatus {
+  DRAFT
+  RECEIVING
+  COMPLETED
+  CANCELLED
+}
+
+enum SalesOrderStatus {
+  DRAFT
+  RELEASED
+  PICKING
+  PACKING
+  SHIPPED
+  CANCELLED
+}
+
+enum OutboundTaskType {
+  PICKING
+  PACKING
+  LOADING
+}
+
+enum OutboundTaskStatus {
+  OPEN
+  IN_PROGRESS
+  DONE
+  CANCELLED
+}
+
+enum BillingComponent {
+  STORAGE
+  HANDLING
+  VAS
+  DEDICATED_RESOURCE
+  FIXED_FEE
+}
+
+enum BillingTransactionStatus {
+  DRAFT
+  POSTED
+}
+
+model Customer {
+  id          String       @id @default(uuid())
+  code        String       @unique
+  name        String
+  type        CustomerType @default(SHARED)
+  phone       String?      @map("phone")
+  address     String?      @map("address") @db.Text
+  province    String?      @map("province")
+  city        String?      @map("city")
+  district    String?      @map("district")
+  subdistrict String?      @map("subdistrict")
+  postalCode  String?      @map("postal_code")
+  isActive    Boolean      @default(true) @map("is_active")
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+  warehouses  Warehouse[]
+  warehouseMappings WarehouseCustomer[]
+  products    Product[]
+  suppliers   Supplier[]
+  inventories InventoryBalance[]
+  inboundAsns InboundAsn[]
+  inboundReceipts InboundReceipt[]
+  billingContracts BillingContract[]
+  billingTransactions BillingTransaction[]
+  salesOrders SalesOrder[]
+  pics        CustomerPic[]
+
+  @@index([isActive])
+  @@map("customers")
+}
+
+model OperatorCompany {
+  id                  String      @id @default(uuid())
+  code                String      @unique
+  name                String
+  phone               String?     @map("phone")
+  address             String?     @map("address") @db.Text
+  province            String?     @map("province")
+  city                String?     @map("city")
+  district            String?     @map("district")
+  subdistrict         String?     @map("subdistrict")
+  postalCode          String?     @map("postal_code")
+  isActive            Boolean     @default(true) @map("is_active")
+  createdAt           DateTime    @default(now()) @map("created_at")
+  updatedAt           DateTime    @updatedAt @map("updated_at")
+  ownedWarehouses     Warehouse[] @relation("WarehouseOwner")
+  operatedWarehouses  Warehouse[] @relation("WarehouseOperator")
+  billingTransactions BillingTransaction[]
+  pics                OperatorCompanyPic[]
+  users               User[]
+
+  @@index([isActive])
+  @@map("operator_companies")
+}
+
+model Warehouse {
+  id                String          @id @default(uuid())
+  code              String          @unique
+  name              String
+  type              WarehouseType   @default(SHARED)
+  phone             String?         @map("phone")
+  address           String?         @map("address") @db.Text
+  province          String?         @map("province")
+  city              String?         @map("city")
+  district          String?         @map("district")
+  subdistrict       String?         @map("subdistrict")
+  postalCode        String?         @map("postal_code")
+  isActive          Boolean         @default(true) @map("is_active")
+  customerId        String?         @map("customer_id")
+  ownerCompanyId    String          @map("owner_company_id")
+  operatorCompanyId String?         @map("operator_company_id")
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
+  customer          Customer?       @relation(fields: [customerId], references: [id])
+  customerMappings  WarehouseCustomer[]
+  ownerCompany      OperatorCompany @relation("WarehouseOwner", fields: [ownerCompanyId], references: [id])
+  operatorCompany   OperatorCompany? @relation("WarehouseOperator", fields: [operatorCompanyId], references: [id])
+  areas             WarehouseArea[]
+  zones             WarehouseZone[]
+  bins              WarehouseBin[]
+  inventories       InventoryBalance[]
+  inboundAsns       InboundAsn[]
+  inboundReceipts   InboundReceipt[]
+  billingTransactions BillingTransaction[]
+  salesOrders       SalesOrder[]
+  outboundWaves     OutboundWave[]
+  outboundTasks     OutboundTask[]
+  userMappings      UserWarehouse[]
+
+  @@index([customerId])
+  @@index([ownerCompanyId])
+  @@index([operatorCompanyId])
+  @@index([isActive])
+  @@map("warehouses")
+}
+
+model UserWarehouse {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  warehouseId String   @map("warehouse_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, warehouseId])
+  @@index([warehouseId])
+  @@map("user_warehouses")
+}
+
+model CustomerPic {
+  id         String   @id @default(uuid())
+  customerId String   @map("customer_id")
+  name       String
+  phone      String?  @map("phone")
+  email      String?  @map("email")
+  sortOrder  Int      @default(0) @map("sort_order")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, sortOrder])
+  @@map("customer_pics")
+}
+
+model OperatorCompanyPic {
+  id                String          @id @default(uuid())
+  operatorCompanyId String          @map("operator_company_id")
+  name              String
+  phone             String?         @map("phone")
+  email             String?         @map("email")
+  sortOrder         Int             @default(0) @map("sort_order")
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
+  operatorCompany   OperatorCompany @relation(fields: [operatorCompanyId], references: [id], onDelete: Cascade)
+
+  @@index([operatorCompanyId, sortOrder])
+  @@map("operator_company_pics")
+}
+
+model WarehouseCustomer {
+  id          String    @id @default(uuid())
+  warehouseId String    @map("warehouse_id")
+  customerId  String    @map("customer_id")
+  isActive    Boolean   @default(true) @map("is_active")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+  customer    Customer  @relation(fields: [customerId], references: [id])
+
+  @@unique([warehouseId, customerId])
+  @@index([warehouseId, isActive])
+  @@index([customerId, isActive])
+  @@map("warehouse_customers")
+}
+
+model WarehouseArea {
+  id          String          @id @default(uuid())
+  warehouseId String          @map("warehouse_id")
+  code        String
+  name        String
+  isActive    Boolean         @default(true) @map("is_active")
+  createdAt   DateTime        @default(now()) @map("created_at")
+  updatedAt   DateTime        @updatedAt @map("updated_at")
+  warehouse   Warehouse       @relation(fields: [warehouseId], references: [id])
+  zones       WarehouseZone[]
+
+  @@unique([warehouseId, code])
+  @@index([warehouseId, isActive])
+  @@map("warehouse_areas")
+}
+
+model WarehouseZone {
+  id          String          @id @default(uuid())
+  warehouseId String          @map("warehouse_id")
+  areaId      String?         @map("area_id")
+  code        String
+  name        String
+  isActive    Boolean         @default(true) @map("is_active")
+  createdAt   DateTime        @default(now()) @map("created_at")
+  updatedAt   DateTime        @updatedAt @map("updated_at")
+  warehouse   Warehouse       @relation(fields: [warehouseId], references: [id])
+  area        WarehouseArea?  @relation(fields: [areaId], references: [id])
+  bins        WarehouseBin[]
+
+  @@unique([warehouseId, code])
+  @@index([areaId])
+  @@index([warehouseId, isActive])
+  @@map("warehouse_zones")
+}
+
+model WarehouseBin {
+  id          String            @id @default(uuid())
+  warehouseId String            @map("warehouse_id")
+  zoneId      String            @map("zone_id")
+  code        String
+  name        String
+  isActive    Boolean           @default(true) @map("is_active")
+  createdAt   DateTime          @default(now()) @map("created_at")
+  updatedAt   DateTime          @updatedAt @map("updated_at")
+  warehouse   Warehouse         @relation(fields: [warehouseId], references: [id])
+  zone        WarehouseZone     @relation(fields: [zoneId], references: [id])
+  inventories InventoryBalance[]
+  inboundReceipts InboundReceipt[]
+  outboundTasks OutboundTask[] @relation("OutboundSourceBin")
+
+  @@unique([warehouseId, code])
+  @@index([zoneId])
+  @@index([warehouseId, isActive])
+  @@map("warehouse_bins")
+}
+
+model Product {
+  id          String            @id @default(uuid())
+  customerId  String            @map("customer_id")
+  sku         String
+  name        String
+  isActive    Boolean           @default(true) @map("is_active")
+  createdAt   DateTime          @default(now()) @map("created_at")
+  updatedAt   DateTime          @updatedAt @map("updated_at")
+  customer    Customer          @relation(fields: [customerId], references: [id])
+  inventories InventoryBalance[]
+  inboundItems InboundAsnItem[]
+  inboundReceipts InboundReceipt[]
+  salesOrderItems SalesOrderItem[]
+  outboundTasks OutboundTask[]
+  supplierMappings ProductSupplier[]
+
+  @@unique([customerId, sku])
+  @@index([customerId, isActive])
+  @@map("products")
+}
+
+model UnitOfMeasure {
+  id          String   @id @default(uuid())
+  code        String   @unique
+  name        String
+  description String?
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  inboundAsnItems InboundAsnItem[]
+  inboundReceipts InboundReceipt[]
+
+  @@index([isActive])
+  @@map("unit_of_measures")
+}
+
+model Supplier {
+  id          String   @id @default(uuid())
+  customerId  String   @map("customer_id")
+  code        String
+  name        String
+  phone       String?  @map("phone")
+  address     String?  @map("address") @db.Text
+  province    String?  @map("province")
+  city        String?  @map("city")
+  district    String?  @map("district")
+  subdistrict String?  @map("subdistrict")
+  postalCode  String?  @map("postal_code")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  customer    Customer @relation(fields: [customerId], references: [id])
+  productMappings ProductSupplier[]
+  inboundItems InboundAsnItem[]
+  pics        SupplierPic[]
+
+  @@unique([customerId, code])
+  @@index([customerId, isActive])
+  @@map("suppliers")
+}
+
+model SupplierPic {
+  id         String   @id @default(uuid())
+  supplierId String   @map("supplier_id")
+  name       String
+  phone      String?  @map("phone")
+  email      String?  @map("email")
+  sortOrder  Int      @default(0) @map("sort_order")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+
+  @@index([supplierId, sortOrder])
+  @@map("supplier_pics")
+}
+
+model ProductSupplier {
+  id         String   @id @default(uuid())
+  productId  String   @map("product_id")
+  supplierId String   @map("supplier_id")
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  product    Product  @relation(fields: [productId], references: [id])
+  supplier   Supplier @relation(fields: [supplierId], references: [id])
+
+  @@unique([productId, supplierId])
+  @@index([productId, isActive])
+  @@index([supplierId, isActive])
+  @@map("product_suppliers")
+}
+
+model InventoryBalance {
+  id          String       @id @default(uuid())
+  customerId  String       @map("customer_id")
+  warehouseId String       @map("warehouse_id")
+  binId       String       @map("bin_id")
+  productId   String       @map("product_id")
+  qtyOnHand   Decimal      @default(0) @map("qty_on_hand") @db.Decimal(18, 4)
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+  customer    Customer     @relation(fields: [customerId], references: [id])
+  warehouse   Warehouse    @relation(fields: [warehouseId], references: [id])
+  bin         WarehouseBin @relation(fields: [binId], references: [id])
+  product     Product      @relation(fields: [productId], references: [id])
+
+  @@unique([customerId, warehouseId, binId, productId])
+  @@index([warehouseId])
+  @@index([binId])
+  @@index([productId])
+  @@map("inventory_balances")
+}
+
+model InboundAsn {
+  id              String           @id @default(uuid())
+  asnNo           String           @unique @map("asn_no")
+  customerId      String           @map("customer_id")
+  warehouseId     String           @map("warehouse_id")
+  referenceNo     String?          @map("reference_no")
+  status          InboundAsnStatus @default(DRAFT)
+  expectedAt      DateTime?        @map("expected_at")
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
+  customer        Customer         @relation(fields: [customerId], references: [id])
+  warehouse       Warehouse        @relation(fields: [warehouseId], references: [id])
+  items           InboundAsnItem[]
+  receipts        InboundReceipt[]
+
+  @@index([customerId])
+  @@index([warehouseId])
+  @@index([status])
+  @@map("inbound_asns")
+}
+
+model InboundAsnItem {
+  id            String      @id @default(uuid())
+  inboundAsnId  String      @map("inbound_asn_id")
+  productId     String      @map("product_id")
+  supplierId    String      @map("supplier_id")
+  uomId         String      @map("uom_id")
+  qtyExpected   Decimal     @map("qty_expected") @db.Decimal(18, 4)
+  qtyReceived   Decimal     @default(0) @map("qty_received") @db.Decimal(18, 4)
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime    @updatedAt @map("updated_at")
+  inboundAsn    InboundAsn  @relation(fields: [inboundAsnId], references: [id])
+  product       Product     @relation(fields: [productId], references: [id])
+  supplier      Supplier    @relation(fields: [supplierId], references: [id])
+  uom           UnitOfMeasure @relation(fields: [uomId], references: [id])
+  receipts      InboundReceipt[]
+
+  @@unique([inboundAsnId, productId, supplierId])
+  @@index([productId])
+  @@index([supplierId])
+  @@index([uomId])
+  @@map("inbound_asn_items")
+}
+
+model InboundReceipt {
+  id             String         @id @default(uuid())
+  inboundAsnId   String         @map("inbound_asn_id")
+  inboundItemId  String?        @map("inbound_item_id")
+  customerId     String         @map("customer_id")
+  warehouseId    String         @map("warehouse_id")
+  binId          String         @map("bin_id")
+  productId      String         @map("product_id")
+  uomId          String         @map("uom_id")
+  qtyReceived    Decimal        @map("qty_received") @db.Decimal(18, 4)
+  note           String?
+  receivedAt     DateTime       @default(now()) @map("received_at")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+  inboundAsn     InboundAsn     @relation(fields: [inboundAsnId], references: [id])
+  inboundItem    InboundAsnItem? @relation(fields: [inboundItemId], references: [id])
+  customer       Customer       @relation(fields: [customerId], references: [id])
+  warehouse      Warehouse      @relation(fields: [warehouseId], references: [id])
+  bin            WarehouseBin   @relation(fields: [binId], references: [id])
+  product        Product        @relation(fields: [productId], references: [id])
+  uom            UnitOfMeasure  @relation(fields: [uomId], references: [id])
+
+  @@index([inboundAsnId])
+  @@index([customerId])
+  @@index([warehouseId])
+  @@index([binId])
+  @@index([productId])
+  @@index([uomId])
+  @@map("inbound_receipts")
+}
+
+model SalesOrder {
+  id            String           @id @default(uuid())
+  orderNo       String           @unique @map("order_no")
+  customerId    String           @map("customer_id")
+  warehouseId   String           @map("warehouse_id")
+  consigneeName String?          @map("consignee_name")
+  referenceNo   String?          @map("reference_no")
+  status        SalesOrderStatus @default(DRAFT)
+  requestedAt   DateTime?        @map("requested_at")
+  shippedAt     DateTime?        @map("shipped_at")
+  createdAt     DateTime         @default(now()) @map("created_at")
+  updatedAt     DateTime         @updatedAt @map("updated_at")
+  customer      Customer         @relation(fields: [customerId], references: [id])
+  warehouse     Warehouse        @relation(fields: [warehouseId], references: [id])
+  items         SalesOrderItem[]
+  waves         OutboundWave[]
+  tasks         OutboundTask[]
+
+  @@index([customerId, status])
+  @@index([warehouseId, status])
+  @@map("sales_orders")
+}
+
+model SalesOrderItem {
+  id           String     @id @default(uuid())
+  salesOrderId String     @map("sales_order_id")
+  productId    String     @map("product_id")
+  qtyOrdered   Decimal    @map("qty_ordered") @db.Decimal(18, 4)
+  qtyPicked    Decimal    @default(0) @map("qty_picked") @db.Decimal(18, 4)
+  qtyPacked    Decimal    @default(0) @map("qty_packed") @db.Decimal(18, 4)
+  qtyShipped   Decimal    @default(0) @map("qty_shipped") @db.Decimal(18, 4)
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+  salesOrder   SalesOrder @relation(fields: [salesOrderId], references: [id])
+  product      Product    @relation(fields: [productId], references: [id])
+  tasks        OutboundTask[]
+
+  @@unique([salesOrderId, productId])
+  @@index([productId])
+  @@map("sales_order_items")
+}
+
+model OutboundWave {
+  id           String     @id @default(uuid())
+  waveNo       String     @unique @map("wave_no")
+  salesOrderId String     @map("sales_order_id")
+  warehouseId  String     @map("warehouse_id")
+  plannedAt    DateTime?  @map("planned_at")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+  salesOrder   SalesOrder @relation(fields: [salesOrderId], references: [id])
+  warehouse    Warehouse  @relation(fields: [warehouseId], references: [id])
+  tasks        OutboundTask[]
+
+  @@index([salesOrderId])
+  @@index([warehouseId])
+  @@map("outbound_waves")
+}
+
+model OutboundTask {
+  id              String             @id @default(uuid())
+  salesOrderId    String             @map("sales_order_id")
+  salesOrderItemId String            @map("sales_order_item_id")
+  waveId          String?            @map("wave_id")
+  warehouseId     String             @map("warehouse_id")
+  productId       String             @map("product_id")
+  sourceBinId     String?            @map("source_bin_id")
+  taskType        OutboundTaskType   @map("task_type")
+  status          OutboundTaskStatus @default(OPEN)
+  qtyTask         Decimal            @map("qty_task") @db.Decimal(18, 4)
+  qtyDone         Decimal            @default(0) @map("qty_done") @db.Decimal(18, 4)
+  assignedTo      String?            @map("assigned_to")
+  completedAt     DateTime?          @map("completed_at")
+  createdAt       DateTime           @default(now()) @map("created_at")
+  updatedAt       DateTime           @updatedAt @map("updated_at")
+  salesOrder      SalesOrder         @relation(fields: [salesOrderId], references: [id])
+  salesOrderItem  SalesOrderItem     @relation(fields: [salesOrderItemId], references: [id])
+  wave            OutboundWave?      @relation(fields: [waveId], references: [id])
+  warehouse       Warehouse          @relation(fields: [warehouseId], references: [id])
+  product         Product            @relation(fields: [productId], references: [id])
+  sourceBin       WarehouseBin?      @relation("OutboundSourceBin", fields: [sourceBinId], references: [id])
+
+  @@index([salesOrderId, taskType, status])
+  @@index([salesOrderItemId])
+  @@index([waveId])
+  @@index([warehouseId])
+  @@index([productId])
+  @@index([sourceBinId])
+  @@map("outbound_tasks")
+}
+
+model BillingContract {
+  id              String      @id @default(uuid())
+  customerId      String      @map("customer_id")
+  contractNo      String      @map("contract_no")
+  name            String
+  periodStart     DateTime    @map("period_start")
+  periodEnd       DateTime?   @map("period_end")
+  currency        String      @default("IDR")
+  billingCycleDay Int         @default(1) @map("billing_cycle_day")
+  isActive        Boolean     @default(true) @map("is_active")
+  createdAt       DateTime    @default(now()) @map("created_at")
+  updatedAt       DateTime    @updatedAt @map("updated_at")
+  customer        Customer    @relation(fields: [customerId], references: [id])
+  rates           BillingRate[]
+
+  @@unique([customerId, contractNo])
+  @@index([customerId, isActive])
+  @@map("billing_contracts")
+}
+
+model BillingRate {
+  id           String           @id @default(uuid())
+  contractId   String           @map("contract_id")
+  component    BillingComponent
+  activityCode String           @map("activity_code")
+  uom          String
+  rate         Decimal          @db.Decimal(18, 4)
+  minCharge    Decimal?         @map("min_charge") @db.Decimal(18, 4)
+  isActive     Boolean          @default(true) @map("is_active")
+  createdAt    DateTime         @default(now()) @map("created_at")
+  updatedAt    DateTime         @updatedAt @map("updated_at")
+  contract     BillingContract  @relation(fields: [contractId], references: [id])
+
+  @@unique([contractId, component, activityCode, uom])
+  @@index([contractId, isActive])
+  @@map("billing_rates")
+}
+
+model BillingTransaction {
+  id                String                   @id @default(uuid())
+  customerId        String                   @map("customer_id")
+  warehouseId       String?                  @map("warehouse_id")
+  operatorCompanyId String?                  @map("operator_company_id")
+  component         BillingComponent
+  activityCode      String                   @map("activity_code")
+  uom               String
+  qty               Decimal                  @db.Decimal(18, 4)
+  amount            Decimal                  @db.Decimal(18, 4)
+  referenceType     String?                  @map("reference_type")
+  referenceId       String?                  @map("reference_id")
+  periodKey         String                   @map("period_key")
+  status            BillingTransactionStatus @default(DRAFT)
+  occurredAt        DateTime                 @map("occurred_at")
+  note              String?
+  createdAt         DateTime                 @default(now()) @map("created_at")
+  updatedAt         DateTime                 @updatedAt @map("updated_at")
+  customer          Customer                 @relation(fields: [customerId], references: [id])
+  warehouse         Warehouse?               @relation(fields: [warehouseId], references: [id])
+  operatorCompany   OperatorCompany?         @relation(fields: [operatorCompanyId], references: [id])
+
+  @@index([customerId, periodKey, status])
+  @@index([warehouseId])
+  @@index([operatorCompanyId])
+  @@index([occurredAt])
+  @@map("billing_transactions")
+}
