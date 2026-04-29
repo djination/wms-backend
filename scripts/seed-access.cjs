@@ -36,38 +36,55 @@ async function main() {
   const mdParent = await upsertMenu('MASTER_DATA', 'Master Data', '/master-data/customers', 20);
   const mdCustomers = await upsertMenu('MD_CUSTOMERS', 'Customers', '/master-data/customers', 21, mdParent.id);
   const mdOperators = await upsertMenu('MD_OPERATORS', 'Operators', '/master-data/operators', 22, mdParent.id);
-  const mdSuppliers = await upsertMenu('MD_SUPPLIERS', 'Suppliers', '/master-data/suppliers', 23, mdParent.id);
-  const mdWarehouses = await upsertMenu('MD_WAREHOUSES', 'Warehouses', '/master-data/warehouses', 24, mdParent.id);
-  const mdProducts = await upsertMenu('MD_PRODUCTS', 'Products', '/master-data/products', 25, mdParent.id);
-
-  const inventoryParent = await upsertMenu('INVENTORY', 'Inventory', '/inventory/balance', 25);
-  const invBalance = await upsertMenu('INV_BALANCE', 'Inventory Balance', '/inventory/balance', 26, inventoryParent.id);
-
-  await prisma.menu.updateMany({
-    where: { code: 'MD_INVENTORY' },
-    data: { isActive: false },
-  });
+  const mdWarehouses = await upsertMenu('MD_WAREHOUSES', 'Warehouses', '/master-data/warehouses', 23, mdParent.id);
+  const mdAreas = await upsertMenu('MD_AREAS', 'Areas', '/master-data/areas', 24, mdParent.id);
+  const mdZones = await upsertMenu('MD_ZONES', 'Zones', '/master-data/zones', 25, mdParent.id);
+  const mdBins = await upsertMenu('MD_BINS', 'Bins', '/master-data/bins', 26, mdParent.id);
+  const mdUoms = await upsertMenu('MD_UOMS', 'UOMs', '/master-data/uoms', 27, mdParent.id);
+  const mdSuppliers = await upsertMenu('MD_SUPPLIERS', 'Suppliers', '/master-data/suppliers', 28, mdParent.id);
+  const mdProducts = await upsertMenu('MD_PRODUCTS', 'Products', '/master-data/products', 29, mdParent.id);
 
   const inboundParent = await upsertMenu('INBOUND', 'Inbound', '/inbound/asn', 30);
   const inAsn = await upsertMenu('INBOUND_ASN', 'ASN', '/inbound/asn', 31, inboundParent.id);
   const inReceiving = await upsertMenu('INBOUND_RECEIVING', 'Receiving', '/inbound/receiving', 32, inboundParent.id);
   const inHistory = await upsertMenu('INBOUND_HISTORY', 'History', '/inbound/history', 33, inboundParent.id);
 
-  const outboundParent = await upsertMenu('OUTBOUND', 'Outbound', '/outbound/sales-orders', 35);
-  const obSalesOrders = await upsertMenu('OUTBOUND_SO', 'Sales orders', '/outbound/sales-orders', 36, outboundParent.id);
-  const obWaves = await upsertMenu('OUTBOUND_WAVES', 'Waves', '/outbound/waves', 37, outboundParent.id);
-  const obTasks = await upsertMenu('OUTBOUND_TASKS', 'Tasks', '/outbound/tasks', 38, outboundParent.id);
+  const inventoryParent = await upsertMenu('INVENTORY', 'Inventory', '/inventory/balance', 34);
+  const invBalance = await upsertMenu('INV_BALANCE', 'Inventory Balance', '/inventory/balance', 35, inventoryParent.id);
 
-  const billingParent = await upsertMenu('BILLING', 'Billing', '/billing/contracts', 39);
-  const blContracts = await upsertMenu('BILLING_CONTRACTS', 'Contracts', '/billing/contracts', 391, billingParent.id);
-  const blRates = await upsertMenu('BILLING_RATES', 'Rates', '/billing/rates', 392, billingParent.id);
-  const blTransactions = await upsertMenu('BILLING_TRANSACTIONS', 'Transactions', '/billing/transactions', 393, billingParent.id);
-  const blSummary = await upsertMenu('BILLING_SUMMARY', 'Summary', '/billing/summary', 394, billingParent.id);
+  const processParent = await upsertMenu('PROCESS_FLOW', 'Process Flow', '/process/transfers', 36);
+  const processTransfers = await upsertMenu('PROCESS_TRANSFERS', 'Internal Transfers', '/process/transfers', 37, processParent.id);
+  const processRecipes = await upsertMenu('PROCESS_RECIPES', 'Recipes (BOM)', '/process/recipes', 38, processParent.id);
+  const processTransformations = await upsertMenu(
+    'PROCESS_TRANSFORMATIONS',
+    'Material Transformations',
+    '/process/transformations',
+    39,
+    processParent.id,
+  );
 
-  const accessParent = await upsertMenu('ACCESS_MANAGEMENT', 'Access Management', '/access/users', 40);
-  const acUsers = await upsertMenu('ACCESS_USERS', 'Users', '/access/users', 41, accessParent.id);
-  const acRoles = await upsertMenu('ACCESS_ROLES', 'Roles', '/access/roles', 42, accessParent.id);
-  const acMenus = await upsertMenu('ACCESS_MENUS', 'Menus', '/access/menus', 43, accessParent.id);
+  await prisma.menu.updateMany({
+    where: { code: 'MD_INVENTORY' },
+    data: { isActive: false },
+  });
+
+  const outboundParent = await upsertMenu('OUTBOUND', 'Outbound', '/outbound/sales-orders', 40);
+  const obSalesOrders = await upsertMenu('OUTBOUND_SO', 'Sales orders', '/outbound/sales-orders', 41, outboundParent.id);
+  const obAllocations = await upsertMenu('OUTBOUND_ALLOCATIONS', 'Allocations', '/outbound/sales-orders', 42, outboundParent.id);
+  const obWaves = await upsertMenu('OUTBOUND_WAVES', 'Waves', '/outbound/waves', 43, outboundParent.id);
+  const obTasks = await upsertMenu('OUTBOUND_TASKS', 'Tasks', '/outbound/tasks', 44, outboundParent.id);
+  const obEvents = await upsertMenu('OUTBOUND_EVENTS', 'Events', '/outbound/sales-orders', 45, outboundParent.id);
+
+  const billingParent = await upsertMenu('BILLING', 'Billing', '/billing/contracts', 50);
+  const blContracts = await upsertMenu('BILLING_CONTRACTS', 'Contracts', '/billing/contracts', 51, billingParent.id);
+  const blRates = await upsertMenu('BILLING_RATES', 'Rates', '/billing/rates', 52, billingParent.id);
+  const blTransactions = await upsertMenu('BILLING_TRANSACTIONS', 'Transactions', '/billing/transactions', 53, billingParent.id);
+  const blSummary = await upsertMenu('BILLING_SUMMARY', 'Summary', '/billing/summary', 54, billingParent.id);
+
+  const accessParent = await upsertMenu('ACCESS_MANAGEMENT', 'Access Management', '/access/users', 60);
+  const acUsers = await upsertMenu('ACCESS_USERS', 'Users', '/access/users', 61, accessParent.id);
+  const acRoles = await upsertMenu('ACCESS_ROLES', 'Roles', '/access/roles', 62, accessParent.id);
+  const acMenus = await upsertMenu('ACCESS_MENUS', 'Menus', '/access/menus', 63, accessParent.id);
 
   const allMenuIds = [
     dashboard.id,
@@ -77,8 +94,16 @@ async function main() {
     mdSuppliers.id,
     mdWarehouses.id,
     mdProducts.id,
+    mdAreas.id,
+    mdZones.id,
+    mdBins.id,
+    mdUoms.id,
     inventoryParent.id,
     invBalance.id,
+    processParent.id,
+    processTransfers.id,
+    processRecipes.id,
+    processTransformations.id,
     inboundParent.id,
     inAsn.id,
     inReceiving.id,
@@ -87,6 +112,8 @@ async function main() {
     obSalesOrders.id,
     obWaves.id,
     obTasks.id,
+    obAllocations.id,
+    obEvents.id,
     billingParent.id,
     blContracts.id,
     blRates.id,
