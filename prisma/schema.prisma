@@ -184,6 +184,7 @@ model Customer {
   salesOrders SalesOrder[]
   outboundAllocations OutboundAllocation[]
   outboundEvents OutboundEventLog[]
+  processFlowEvents ProcessFlowEventLog[]
   internalTransfers InternalTransfer[]
   materialTransformations MaterialTransformation[]
   recipes      ProcessRecipe[]
@@ -211,6 +212,7 @@ model OperatorCompany {
   operatedWarehouses  Warehouse[] @relation("WarehouseOperator")
   billingTransactions BillingTransaction[]
   outboundEvents OutboundEventLog[]
+  processFlowEvents ProcessFlowEventLog[]
   pics                OperatorCompanyPic[]
   users               User[]
 
@@ -252,6 +254,7 @@ model Warehouse {
   outboundTasks     OutboundTask[]
   outboundAllocations OutboundAllocation[]
   outboundEvents    OutboundEventLog[]
+  processFlowEvents ProcessFlowEventLog[]
   transfersFrom     InternalTransfer[] @relation("TransferFromWarehouse")
   transfersTo       InternalTransfer[] @relation("TransferToWarehouse")
   transformations   MaterialTransformation[]
@@ -519,6 +522,7 @@ model InternalTransfer {
   fromWarehouse   Warehouse              @relation("TransferFromWarehouse", fields: [fromWarehouseId], references: [id])
   toWarehouse     Warehouse              @relation("TransferToWarehouse", fields: [toWarehouseId], references: [id])
   lines           InternalTransferLine[]
+  eventLogs       ProcessFlowEventLog[]
 
   @@index([customerId, status])
   @@index([fromWarehouseId, status])
@@ -565,6 +569,7 @@ model MaterialTransformation {
   recipeId          String?                      @map("recipe_id")
   recipe            ProcessRecipe?               @relation(fields: [recipeId], references: [id])
   inputs            MaterialTransformationInput[]
+  eventLogs         ProcessFlowEventLog[]
 
   @@index([customerId, status])
   @@index([warehouseId, status])
@@ -840,6 +845,31 @@ model OutboundEventLog {
   @@index([warehouseId, createdAt])
   @@index([customerId, createdAt])
   @@map("outbound_event_logs")
+}
+
+model ProcessFlowEventLog {
+  id                       String                  @id @default(uuid())
+  eventCode                String                  @map("event_code")
+  processType              String                  @map("process_type")
+  customerId               String                  @map("customer_id")
+  warehouseId              String                  @map("warehouse_id")
+  operatorCompanyId        String?                 @map("operator_company_id")
+  internalTransferId       String?                 @map("internal_transfer_id")
+  materialTransformationId String?                 @map("material_transformation_id")
+  note                     String?
+  metadata                 Json?
+  createdAt                DateTime                @default(now()) @map("created_at")
+  customer                 Customer                @relation(fields: [customerId], references: [id])
+  warehouse                Warehouse               @relation(fields: [warehouseId], references: [id])
+  operatorCompany          OperatorCompany?        @relation(fields: [operatorCompanyId], references: [id])
+  internalTransfer         InternalTransfer?       @relation(fields: [internalTransferId], references: [id])
+  materialTransformation   MaterialTransformation? @relation(fields: [materialTransformationId], references: [id])
+
+  @@index([customerId, createdAt])
+  @@index([warehouseId, createdAt])
+  @@index([internalTransferId, createdAt])
+  @@index([materialTransformationId, createdAt])
+  @@map("process_flow_event_logs")
 }
 
 model BillingContract {

@@ -1,5 +1,12 @@
 import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
-import { InternalTransferStatus, MaterialTransformationStatus, Prisma, WarehouseType } from '@prisma/client';
+import {
+  BillingComponent,
+  BillingTransactionStatus,
+  InternalTransferStatus,
+  MaterialTransformationStatus,
+  Prisma,
+  WarehouseType,
+} from '@prisma/client';
 import { throwScopeForbidden } from '../../common/errors/scope-error';
 import { JwtPayload } from '../auth/strategies/jwt.strategy';
 import { PrismaService } from '../prisma/prisma.service';
@@ -46,7 +53,7 @@ export class ProcessFlowService {
     );
 
     try {
-      return await this.prisma.internalTransfer.create({
+      const created = await this.prisma.internalTransfer.create({
         data: {
           transferNo: dto.transferNo.trim().toUpperCase(),
           customerId: dto.customerId,
@@ -69,6 +76,16 @@ export class ProcessFlowService {
           lines: { include: { product: true, sourceBin: true, destinationBin: true } },
         },
       });
+      await this.recordProcessFlowEvent(this.prisma, {
+        processType: 'TRANSFER',
+        eventCode: 'TRANSFER_CREATED',
+        customerId: created.customerId,
+        warehouseId: created.fromWarehouseId,
+        operatorCompanyId: user?.operatorCompanyId,
+        internalTransferId: created.id,
+        note: `Transfer ${created.transferNo} created`,
+      });
+      return created;
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         throw new ConflictException('Transfer number already exists');
@@ -152,9 +169,21 @@ export class ProcessFlowService {
             qtyOnHand: { increment: line.qty },
           },
         });
+
+        await this.createProcessFlowBillingTransaction(tx, {
+          customerId: transfer.customerId,
+          warehouseId: transfer.fromWarehouseId,
+          operatorCompanyId: user?.operatorCompanyId,
+          qty: line.qty,
+          activityCode: 'PROC_TRANSFER_QTY',
+          referenceType: 'INTERNAL_TRANSFER',
+          referenceId: transfer.id,
+          occurredAt: new Date(),
+          note: `Auto-generated from transfer ${transfer.transferNo} completion`,
+        });
       }
 
-      return tx.internalTransfer.update({
+      const completed = await tx.internalTransfer.update({
         where: { id: transfer.id },
         data: {
           status: InternalTransferStatus.COMPLETED,
@@ -167,6 +196,16 @@ export class ProcessFlowService {
           lines: { include: { product: true, sourceBin: true, destinationBin: true } },
         },
       });
+      await this.recordProcessFlowEvent(tx, {
+        processType: 'TRANSFER',
+        eventCode: 'TRANSFER_COMPLETED',
+        customerId: transfer.customerId,
+        warehouseId: transfer.fromWarehouseId,
+        operatorCompanyId: user?.operatorCompanyId,
+        internalTransferId: transfer.id,
+        note: `Transfer ${transfer.transferNo} completed`,
+      });
+      return completed;
     });
   }
 
@@ -186,6 +225,94 @@ export class ProcessFlowService {
     });
   }
 
+  async listEvents(user?: JwtPayload, processType?: string) {
+    const warehouseIds = this.allowedWarehouseIds(user);
+    if (warehouseIds !== undefined && warehouseIds.length === 0) return [];
+    const normalizedProcessType = processType?.trim().toUpperCase();
+    return this.prisma.processFlowEventLog.findMany({
+      where: {
+        ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}),
+        ...(normalizedProcessType ? { processType: normalizedProcessType } : {}),
+      },
+      include: {
+        customer: { select: { id: true, code: true, name: true } },
+        warehouse: { select: { id: true, code: true, name: true } },
+        operatorCompany: { select: { id: true, code: true, name: true } },
+        internalTransfer: { select: { id: true, transferNo: true, status: true } },
+        materialTransformation: { select: { id: true, processNo: true, status: true } },
+      },
+      orderBy: [{ createdAt: 'desc' }],
+      take: 300,
+    });
+  }
+
+  async billingSummary(user?: JwtPayload) {
+    const warehouseIds = this.allowedWarehouseIds(user);
+    const where: Prisma.BillingTransactionWhereInput = {
+      referenceType: { in: ['INTERNAL_TRANSFER', 'MATERIAL_TRANSFORMATION'] },
+      ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}),
+    };
+    const rows = await this.prisma.billingTransaction.findMany({
+      where,
+      select: {
+        component: true,
+        activityCode: true,
+        qty: true,
+        amount: true,
+        status: true,
+      },
+      orderBy: [{ createdAt: 'desc' }],
+      take: 5000,
+    });
+    const byActivity: Record<
+      string,
+      {
+        component: BillingComponent;
+        activityCode: string;
+        count: number;
+        qty: Prisma.Decimal;
+        amount: Prisma.Decimal;
+      }
+    > = {};
+    for (const row of rows) {
+      const key = `${row.component}:${row.activityCode}`;
+      if (!byActivity[key]) {
+        byActivity[key] = {
+          component: row.component,
+          activityCode: row.activityCode,
+          count: 0,
+          qty: new Prisma.Decimal(0),
+          amount: new Prisma.Decimal(0),
+        };
+      }
+      byActivity[key].count += 1;
+      byActivity[key].qty = byActivity[key].qty.plus(row.qty);
+      byActivity[key].amount = byActivity[key].amount.plus(row.amount);
+    }
+    const summaryRows = Object.values(byActivity).map((row) => ({
+      component: row.component,
+      activityCode: row.activityCode,
+      count: row.count,
+      qty: row.qty.toString(),
+      amount: row.amount.toString(),
+    }));
+    const totalQty = rows.reduce((acc, row) => acc.plus(row.qty), new Prisma.Decimal(0));
+    const totalAmount = rows.reduce((acc, row) => acc.plus(row.amount), new Prisma.Decimal(0));
+    const byStatus = rows.reduce<Record<string, number>>((acc, row) => {
+      const key = row.status;
+      acc[key] = (acc[key] ?? 0) + 1;
+      return acc;
+    }, {});
+
+    return {
+      totalTransactions: rows.length,
+      totalQty: totalQty.toString(),
+      totalAmount: totalAmount.toString(),
+      byStatus,
+      byActivity: summaryRows,
+    };
+  }
+
   async createTransformation(dto: CreateMaterialTransformationDto, user?: JwtPayload) {
     if (dto.inputs.length === 0) throw new BadRequestException('Transformation inputs cannot be empty');
     this.assertWarehouseAllowed(user, dto.warehouseId);
@@ -196,7 +323,7 @@ export class ProcessFlowService {
     );
 
     try {
-      return await this.prisma.materialTransformation.create({
+      const created = await this.prisma.materialTransformation.create({
         data: {
           processNo: dto.processNo.trim().toUpperCase(),
           customerId: dto.customerId,
@@ -221,6 +348,16 @@ export class ProcessFlowService {
           inputs: { include: { product: true, bin: true } },
         },
       });
+      await this.recordProcessFlowEvent(this.prisma, {
+        processType: 'TRANSFORMATION',
+        eventCode: 'TRANSFORMATION_CREATED',
+        customerId: created.customerId,
+        warehouseId: created.warehouseId,
+        operatorCompanyId: user?.operatorCompanyId,
+        materialTransformationId: created.id,
+        note: `Transformation ${created.processNo} created`,
+      });
+      return created;
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         throw new ConflictException('Process number already exists');
@@ -306,7 +443,19 @@ export class ProcessFlowService {
         },
       });
 
-      return tx.materialTransformation.update({
+      await this.createProcessFlowBillingTransaction(tx, {
+        customerId: process.customerId,
+        warehouseId: process.warehouseId,
+        operatorCompanyId: user?.operatorCompanyId,
+        qty: process.qtyOutput,
+        activityCode: 'PROC_TRANSFORM_OUT_QTY',
+        referenceType: 'MATERIAL_TRANSFORMATION',
+        referenceId: process.id,
+        occurredAt: new Date(),
+        note: `Auto-generated from transformation ${process.processNo} completion`,
+      });
+
+      const completed = await tx.materialTransformation.update({
         where: { id: process.id },
         data: {
           status: MaterialTransformationStatus.COMPLETED,
@@ -320,6 +469,16 @@ export class ProcessFlowService {
           inputs: { include: { product: true, bin: true } },
         },
       });
+      await this.recordProcessFlowEvent(tx, {
+        processType: 'TRANSFORMATION',
+        eventCode: 'TRANSFORMATION_COMPLETED',
+        customerId: process.customerId,
+        warehouseId: process.warehouseId,
+        operatorCompanyId: user?.operatorCompanyId,
+        materialTransformationId: process.id,
+        note: `Transformation ${process.processNo} completed`,
+      });
+      return completed;
     });
   }
 
@@ -463,7 +622,7 @@ export class ProcessFlowService {
     }));
 
     try {
-      return await this.prisma.materialTransformation.create({
+      const created = await this.prisma.materialTransformation.create({
         data: {
           processNo: dto.processNo.trim().toUpperCase(),
           customerId: recipe.customerId,
@@ -490,6 +649,17 @@ export class ProcessFlowService {
           inputs: { include: { product: true, bin: true } },
         },
       });
+      await this.recordProcessFlowEvent(this.prisma, {
+        processType: 'TRANSFORMATION',
+        eventCode: 'TRANSFORMATION_CREATED_FROM_RECIPE',
+        customerId: created.customerId,
+        warehouseId: created.warehouseId,
+        operatorCompanyId: user?.operatorCompanyId,
+        materialTransformationId: created.id,
+        note: `Transformation ${created.processNo} created from recipe`,
+        metadata: { recipeId: created.recipeId ?? null },
+      });
+      return created;
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         throw new ConflictException('Process number already exists');
@@ -590,5 +760,86 @@ export class ProcessFlowService {
     if (unique.size !== normalized.length) {
       throw new BadRequestException('Duplicate product in recipe lines is not allowed');
     }
+  }
+
+  private periodKeyFromDate(date: Date): string {
+    return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+  }
+
+  private async createProcessFlowBillingTransaction(
+    tx: Prisma.TransactionClient,
+    params: {
+      customerId: string;
+      warehouseId: string;
+      operatorCompanyId?: string | null;
+      qty: Prisma.Decimal;
+      activityCode: string;
+      referenceType: string;
+      referenceId: string;
+      occurredAt?: Date;
+      note?: string;
+    },
+  ) {
+    const occurredAt = params.occurredAt ?? new Date();
+    const activeRate = await tx.billingRate.findFirst({
+      where: {
+        isActive: true,
+        activityCode: params.activityCode,
+        component: BillingComponent.HANDLING,
+        contract: { customerId: params.customerId, isActive: true },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { rate: true },
+    });
+    const rate = activeRate?.rate ?? new Prisma.Decimal(0);
+    const amount = new Prisma.Decimal(params.qty).mul(rate);
+
+    await tx.billingTransaction.create({
+      data: {
+        customerId: params.customerId,
+        warehouseId: params.warehouseId,
+        operatorCompanyId: params.operatorCompanyId,
+        component: BillingComponent.HANDLING,
+        activityCode: params.activityCode,
+        uom: 'QTY',
+        qty: params.qty,
+        amount,
+        referenceType: params.referenceType,
+        referenceId: params.referenceId,
+        periodKey: this.periodKeyFromDate(occurredAt),
+        status: BillingTransactionStatus.DRAFT,
+        occurredAt,
+        note: params.note,
+      },
+    });
+  }
+
+  private async recordProcessFlowEvent(
+    tx: Prisma.TransactionClient | PrismaService,
+    params: {
+      processType: 'TRANSFER' | 'TRANSFORMATION';
+      eventCode: string;
+      customerId: string;
+      warehouseId: string;
+      operatorCompanyId?: string | null;
+      internalTransferId?: string;
+      materialTransformationId?: string;
+      note?: string;
+      metadata?: Prisma.JsonObject;
+    },
+  ) {
+    await tx.processFlowEventLog.create({
+      data: {
+        processType: params.processType,
+        eventCode: params.eventCode,
+        customerId: params.customerId,
+        warehouseId: params.warehouseId,
+        operatorCompanyId: params.operatorCompanyId,
+        internalTransferId: params.internalTransferId,
+        materialTransformationId: params.materialTransformationId,
+        note: params.note,
+        metadata: params.metadata,
+      },
+    });
   }
 }

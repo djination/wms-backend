@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
@@ -39,6 +39,18 @@ export class ProcessFlowController {
   @ApiOperation({ summary: 'List material transformations' })
   listTransformations(@CurrentUser() user: JwtPayload) {
     return this.service.listTransformations(user);
+  }
+
+  @Get('events')
+  @ApiOperation({ summary: 'List process flow event logs' })
+  listEvents(@CurrentUser() user: JwtPayload, @Query('processType') processType?: string) {
+    return this.service.listEvents(user, processType);
+  }
+
+  @Get('billing-summary')
+  @ApiOperation({ summary: 'Get process flow billing summary' })
+  billingSummary(@CurrentUser() user: JwtPayload) {
+    return this.service.billingSummary(user);
   }
 
   @Post('transformations')
