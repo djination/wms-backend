@@ -11,6 +11,7 @@ import { KpiModule } from './modules/kpi/kpi.module';
 import { MasterDataModule } from './modules/master-data/master-data.module';
 import { MessagingModule } from './modules/messaging/messaging.module';
 import { OutboundModule } from './modules/outbound/outbound.module';
+import { ProcessFlowModule } from './modules/process-flow/process-flow.module';
 import { PrismaModule } from './modules/prisma/prisma.module';
 import { RedisModule } from './modules/redis/redis.module';
 import { StorageModule } from './modules/storage/storage.module';
@@ -37,6 +38,7 @@ import { validationSchema } from './config/env.validation';
     MasterDataModule,
     InboundModule,
     OutboundModule,
+    ProcessFlowModule,
     KpiModule,
   ],
 })

@@ -50,6 +50,18 @@ export class OutboundController {
     return this.service.softDeleteSalesOrder(id, user);
   }
 
+  @Post('sales-orders/:id/allocate')
+  @ApiOperation({ summary: 'Auto allocate inventory for sales order' })
+  allocateSalesOrder(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.service.allocateSalesOrder(id, user);
+  }
+
+  @Post('sales-orders/:id/reallocate')
+  @ApiOperation({ summary: 'Reallocate inventory by recreating outbound allocations' })
+  reallocateSalesOrder(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.service.reallocateSalesOrder(id, user);
+  }
+
   @Get('waves')
   @ApiOperation({ summary: 'List outbound waves' })
   listWaves(@CurrentUser() user: JwtPayload) {
@@ -72,6 +84,22 @@ export class OutboundController {
   @ApiOperation({ summary: 'List outbound tasks by status/order' })
   listTasks(@CurrentUser() user: JwtPayload, @Query('salesOrderId') salesOrderId?: string, @Query('status') status?: string) {
     return this.service.listTasks(user, salesOrderId, status);
+  }
+
+  @Get('events')
+  @ApiOperation({ summary: 'List outbound event logs by sales order/task' })
+  listEvents(
+    @CurrentUser() user: JwtPayload,
+    @Query('salesOrderId') salesOrderId?: string,
+    @Query('outboundTaskId') outboundTaskId?: string,
+  ) {
+    return this.service.listEvents(user, salesOrderId, outboundTaskId);
+  }
+
+  @Get('allocations')
+  @ApiOperation({ summary: 'List outbound allocations by sales order' })
+  listAllocations(@CurrentUser() user: JwtPayload, @Query('salesOrderId') salesOrderId?: string) {
+    return this.service.listAllocations(user, salesOrderId);
   }
 
   @Post('tasks')
