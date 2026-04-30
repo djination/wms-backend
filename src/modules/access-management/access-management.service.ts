@@ -238,6 +238,8 @@ export class AccessManagementService {
           email: dto.email.trim().toLowerCase(),
           name: dto.name?.trim(),
           operatorCompanyId: dto.operatorCompanyId,
+          canAccessWeb: dto.canAccessWeb ?? true,
+          canAccessMobile: dto.canAccessMobile ?? false,
           passwordHash,
           warehouseMappings: warehouseIds.length
             ? {
@@ -275,6 +277,8 @@ export class AccessManagementService {
       email: dto.email?.trim().toLowerCase(),
       name: dto.name?.trim(),
       isActive: dto.isActive,
+      canAccessWeb: dto.canAccessWeb,
+      canAccessMobile: dto.canAccessMobile,
       ...(dto.operatorCompanyId !== undefined ? { operatorCompanyId: dto.operatorCompanyId } : {}),
     };
     if (dto.password) {

@@ -12,7 +12,9 @@ import { CreateOperatorCompanyDto } from './dto/create-operator-company.dto';
 import { CreateProductDto } from './dto/create-product.dto';
 import { CreateSupplierDto } from './dto/create-supplier.dto';
 import { CreateUomDto } from './dto/create-uom.dto';
+import { CreateProductUomConversionDto } from './dto/create-product-uom-conversion.dto';
 import { DeleteMode } from './dto/delete-master-data.dto';
+import { ListProductUomConversionsDto } from './dto/list-product-uom-conversions.dto';
 import { UpdateAreaDto } from './dto/update-area.dto';
 import { UpdateBinDto } from './dto/update-bin.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
@@ -20,6 +22,7 @@ import { UpdateOperatorCompanyDto } from './dto/update-operator-company.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { UpdateSupplierDto } from './dto/update-supplier.dto';
 import { UpdateUomDto } from './dto/update-uom.dto';
+import { UpdateProductUomConversionDto } from './dto/update-product-uom-conversion.dto';
 import { UpdateWarehouseDto } from './dto/update-warehouse.dto';
 import { UpdateZoneDto } from './dto/update-zone.dto';
 import { CreateWarehouseDto } from './dto/create-warehouse.dto';
@@ -678,9 +681,15 @@ export class MasterDataService {
       where: customerIds ? { customerId: { in: customerIds } } : undefined,
       include: {
         customer: true,
+        baseUom: true,
         supplierMappings: {
           where: { isActive: true },
           include: { supplier: true },
+        },
+        uomConversions: {
+          where: { isActive: true },
+          include: { fromUom: true, toUom: true },
+          orderBy: [{ createdAt: 'desc' }],
         },
       },
       orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
@@ -712,12 +721,16 @@ export class MasterDataService {
     if (dto.supplierIds && dto.supplierIds.length > 0) {
       await this.assertSuppliersBelongToCustomer(dto.customerId, dto.supplierIds);
     }
+    if (dto.baseUomId) {
+      await this.assertActiveUom(dto.baseUomId);
+    }
     try {
       return await this.prisma.product.create({
         data: {
           customerId: dto.customerId,
           sku: dto.sku.trim().toUpperCase(),
           name: dto.name.trim(),
+          baseUomId: dto.baseUomId,
           supplierMappings:
             dto.supplierIds && dto.supplierIds.length > 0
               ? {
@@ -730,9 +743,15 @@ export class MasterDataService {
         },
         include: {
           customer: true,
+          baseUom: true,
           supplierMappings: {
             where: { isActive: true },
             include: { supplier: true },
+          },
+          uomConversions: {
+            where: { isActive: true },
+            include: { fromUom: true, toUom: true },
+            orderBy: [{ createdAt: 'desc' }],
           },
         },
       });
@@ -810,12 +829,16 @@ export class MasterDataService {
     if (dto.supplierIds) {
       await this.assertSuppliersBelongToCustomer(product.customerId, dto.supplierIds);
     }
+    if (dto.baseUomId) {
+      await this.assertActiveUom(dto.baseUomId);
+    }
     return this.prisma.$transaction(async (tx) => {
       const updated = await tx.product.update({
         where: { id },
         data: {
           ...(dto.sku !== undefined ? { sku: dto.sku.trim().toUpperCase() } : {}),
           ...(dto.name !== undefined ? { name: dto.name.trim() } : {}),
+          ...(dto.baseUomId !== undefined ? { baseUomId: dto.baseUomId } : {}),
           ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
         },
       });
@@ -848,9 +871,15 @@ export class MasterDataService {
         where: { id: updated.id },
         include: {
           customer: true,
+          baseUom: true,
           supplierMappings: {
             where: { isActive: true },
             include: { supplier: true },
+          },
+          uomConversions: {
+            where: { isActive: true },
+            include: { fromUom: true, toUom: true },
+            orderBy: [{ createdAt: 'desc' }],
           },
         },
       });
@@ -1025,6 +1054,111 @@ export class MasterDataService {
     });
   }
 
+  async listProductUomConversions(query: ListProductUomConversionsDto, user?: JwtPayload) {
+    if (query.productId) {
+      await this.assertUserAllowedCustomerByProductId(user, query.productId);
+    }
+    const customerIds = await this.allowedCustomerIdsForUser(user);
+    if (!query.productId && customerIds !== undefined && customerIds.length === 0) return [];
+    return this.prisma.productUomConversion.findMany({
+      where: {
+        ...(query.productId ? { productId: query.productId } : {}),
+        ...(customerIds ? { product: { customerId: { in: customerIds } } } : {}),
+      },
+      include: {
+        product: { include: { customer: true, baseUom: true } },
+        fromUom: true,
+        toUom: true,
+      },
+      orderBy: [{ isActive: 'desc' }, { createdAt: 'desc' }],
+    });
+  }
+
+  async createProductUomConversion(dto: CreateProductUomConversionDto, user?: JwtPayload) {
+    await this.assertUserAllowedCustomerByProductId(user, dto.productId);
+    const product = await this.prisma.product.findUnique({
+      where: { id: dto.productId },
+      select: { id: true, isActive: true },
+    });
+    if (!product || !product.isActive) {
+      throw new BadRequestException('Product not found or inactive');
+    }
+    await this.assertActiveUom(dto.fromUomId);
+    await this.assertActiveUom(dto.toUomId);
+    if (dto.fromUomId === dto.toUomId) {
+      throw new BadRequestException('fromUomId and toUomId cannot be the same');
+    }
+    try {
+      return await this.prisma.productUomConversion.create({
+        data: {
+          productId: dto.productId,
+          fromUomId: dto.fromUomId,
+          toUomId: dto.toUomId,
+          factor: new Prisma.Decimal(dto.factor),
+          note: dto.note?.trim() || null,
+          isActive: dto.isActive ?? true,
+        },
+        include: {
+          product: { include: { customer: true, baseUom: true } },
+          fromUom: true,
+          toUom: true,
+        },
+      });
+    } catch (err) {
+      this.rethrowKnownConstraint(err, 'Product UOM conversion already exists');
+    }
+  }
+
+  async updateProductUomConversion(id: string, dto: UpdateProductUomConversionDto, user?: JwtPayload) {
+    const existing = await this.prisma.productUomConversion.findUnique({
+      where: { id },
+      select: { id: true, productId: true },
+    });
+    if (!existing) throw new NotFoundException('Product UOM conversion not found');
+    await this.assertUserAllowedCustomerByProductId(user, existing.productId);
+    if (dto.fromUomId) await this.assertActiveUom(dto.fromUomId);
+    if (dto.toUomId) await this.assertActiveUom(dto.toUomId);
+    const fromUomId = dto.fromUomId ?? undefined;
+    const toUomId = dto.toUomId ?? undefined;
+    if (fromUomId && toUomId && fromUomId === toUomId) {
+      throw new BadRequestException('fromUomId and toUomId cannot be the same');
+    }
+    try {
+      return await this.prisma.productUomConversion.update({
+        where: { id },
+        data: {
+          ...(dto.fromUomId !== undefined ? { fromUomId: dto.fromUomId } : {}),
+          ...(dto.toUomId !== undefined ? { toUomId: dto.toUomId } : {}),
+          ...(dto.factor !== undefined ? { factor: new Prisma.Decimal(dto.factor) } : {}),
+          ...(dto.note !== undefined ? { note: dto.note?.trim() || null } : {}),
+          ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
+        },
+        include: {
+          product: { include: { customer: true, baseUom: true } },
+          fromUom: true,
+          toUom: true,
+        },
+      });
+    } catch (err) {
+      this.rethrowKnownConstraint(err, 'Product UOM conversion already exists');
+    }
+  }
+
+  async deleteProductUomConversion(id: string, mode: DeleteMode, user?: JwtPayload) {
+    const existing = await this.prisma.productUomConversion.findUnique({
+      where: { id },
+      select: { id: true, productId: true },
+    });
+    if (!existing) throw new NotFoundException('Product UOM conversion not found');
+    await this.assertUserAllowedCustomerByProductId(user, existing.productId);
+    if (mode === DeleteMode.HARD) {
+      await this.prisma.productUomConversion.delete({ where: { id } });
+      return { success: true, mode, id };
+    }
+    await this.prisma.productUomConversion.update({ where: { id }, data: { isActive: false } });
+    return { success: true, mode, id };
+  }
+
   private async assertActiveWarehouse(id: string) {
     const warehouse = await this.prisma.warehouse.findUnique({
       where: { id },
@@ -1168,6 +1302,14 @@ export class MasterDataService {
   private async assertUomExists(id: string) {
     const data = await this.prisma.unitOfMeasure.findUnique({ where: { id }, select: { id: true } });
     if (!data) throw new NotFoundException('UOM not found');
+  }
+
+  private async assertActiveUom(id: string) {
+    const data = await this.prisma.unitOfMeasure.findUnique({
+      where: { id },
+      select: { id: true, isActive: true },
+    });
+    if (!data || !data.isActive) throw new BadRequestException('UOM not found or inactive');
   }
 
   private async assertSuppliersBelongToCustomer(customerId: string, supplierIds: string[]) {

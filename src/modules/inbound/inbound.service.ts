@@ -20,7 +20,18 @@ export class InboundService {
       include: {
         customer: true,
         warehouse: true,
-        items: { include: { product: true, supplier: true, uom: true } },
+        items: {
+          include: {
+            product: {
+              include: {
+                baseUom: true,
+                uomConversions: { where: { isActive: true }, include: { fromUom: true, toUom: true } },
+              },
+            },
+            supplier: true,
+            uom: true,
+          },
+        },
       },
       orderBy: [{ createdAt: 'desc' }],
     });
@@ -34,6 +45,9 @@ export class InboundService {
       dto.items.map((i) => ({ productId: i.productId, supplierId: i.supplierId })),
     );
     await this.assertUomsActive(dto.items.map((i) => i.uomId));
+    const preparedItems = await Promise.all(
+      dto.items.map((item) => this.prepareProductQtyForInbound(this.prisma, dto.customerId, item.productId, item.uomId, item.qtyExpected)),
+    );
     try {
       return await this.prisma.inboundAsn.create({
         data: {
@@ -44,11 +58,12 @@ export class InboundService {
           expectedAt: dto.expectedAt ? new Date(dto.expectedAt) : undefined,
           status: InboundAsnStatus.DRAFT,
           items: {
-            create: dto.items.map((item) => ({
+            create: dto.items.map((item, idx) => ({
               productId: item.productId,
               supplierId: item.supplierId,
               uomId: item.uomId,
               qtyExpected: new Prisma.Decimal(item.qtyExpected),
+              qtyExpectedBase: preparedItems[idx].qtyBase,
             })),
           },
         },
@@ -109,6 +124,9 @@ export class InboundService {
       dto.items.map((i) => ({ productId: i.productId, supplierId: i.supplierId })),
     );
     await this.assertUomsActive(dto.items.map((i) => i.uomId));
+    const preparedItems = await Promise.all(
+      dto.items.map((item) => this.prepareProductQtyForInbound(this.prisma, asn.customerId, item.productId, item.uomId, item.qtyExpected)),
+    );
 
     const receiptCount = await this.prisma.inboundReceipt.count({
       where: { inboundAsnId: id },
@@ -120,13 +138,15 @@ export class InboundService {
     await this.prisma.$transaction(async (tx) => {
       await tx.inboundAsnItem.deleteMany({ where: { inboundAsnId: id } });
       await tx.inboundAsnItem.createMany({
-        data: dto.items.map((item) => ({
+        data: dto.items.map((item, idx) => ({
           inboundAsnId: id,
           productId: item.productId,
           supplierId: item.supplierId,
           uomId: item.uomId,
           qtyExpected: new Prisma.Decimal(item.qtyExpected),
           qtyReceived: new Prisma.Decimal(0),
+          qtyExpectedBase: preparedItems[idx].qtyBase,
+          qtyReceivedBase: new Prisma.Decimal(0),
         })),
       });
     });
@@ -194,9 +214,17 @@ export class InboundService {
         throw new BadRequestException('Product not found/inactive or does not belong to ASN customer');
       }
 
-      const qtyReceived = new Prisma.Decimal(dto.qtyReceived);
-      const nextQtyReceived = new Prisma.Decimal(item.qtyReceived).plus(qtyReceived);
-      if (nextQtyReceived.greaterThan(item.qtyExpected)) {
+      await this.assertUniqueProductSerials(
+        tx,
+        asn.customerId,
+        dto.productId,
+        dto.serialNos,
+      );
+
+      const preparedReceived = await this.prepareProductQtyForInbound(tx, asn.customerId, dto.productId, dto.uomId ?? item.uomId, dto.qtyReceived);
+      const qtyReceivedBase = preparedReceived.qtyBase;
+      const nextQtyReceivedBase = new Prisma.Decimal(item.qtyReceivedBase).plus(qtyReceivedBase);
+      if (nextQtyReceivedBase.greaterThan(item.qtyExpectedBase)) {
         throw new BadRequestException('Received quantity exceeds ASN expected quantity');
       }
 
@@ -214,16 +242,16 @@ export class InboundService {
           warehouseId: asn.warehouseId,
           binId: dto.binId,
           productId: dto.productId,
-          qtyOnHand: qtyReceived,
+          qtyOnHand: qtyReceivedBase,
         },
         update: {
-          qtyOnHand: { increment: qtyReceived },
+          qtyOnHand: { increment: qtyReceivedBase },
         },
       });
 
       await tx.inboundAsnItem.update({
         where: { id: item.id },
-        data: { qtyReceived: nextQtyReceived },
+        data: { qtyReceived: nextQtyReceivedBase, qtyReceivedBase: nextQtyReceivedBase },
       });
 
       await tx.inboundReceipt.create({
@@ -233,9 +261,15 @@ export class InboundService {
           customerId: asn.customerId,
           warehouseId: asn.warehouseId,
           productId: dto.productId,
-          uomId: item.uomId,
+          uomId: preparedReceived.uomId,
           binId: dto.binId,
-          qtyReceived,
+          qtyReceived: qtyReceivedBase,
+          qtyReceivedInput: preparedReceived.qtyInput,
+          conversionFactor: preparedReceived.conversionFactor,
+          lotNo: dto.lotNo?.trim() || undefined,
+          batchNo: dto.batchNo?.trim() || undefined,
+          serialNos: dto.serialNos && dto.serialNos.length > 0 ? dto.serialNos.map((s) => String(s).trim()).filter(Boolean) : undefined,
+          expiryDate: dto.expiryDate ? new Date(dto.expiryDate) : undefined,
           note: dto.note?.trim(),
         },
       });
@@ -246,9 +280,7 @@ export class InboundService {
       });
       if (!refreshed) throw new BadRequestException('ASN not found after update');
 
-      const allDone = refreshed.items.every((it) =>
-        new Prisma.Decimal(it.qtyReceived).equals(it.qtyExpected),
-      );
+      const allDone = refreshed.items.every((it) => new Prisma.Decimal(it.qtyReceivedBase).equals(it.qtyExpectedBase));
       await tx.inboundAsn.update({
         where: { id: asn.id },
         data: { status: allDone ? InboundAsnStatus.COMPLETED : InboundAsnStatus.RECEIVING },
@@ -264,6 +296,59 @@ export class InboundService {
         },
       });
     });
+  }
+
+  private normalizeSerialNos(serialNos?: string[]): string[] {
+    if (!Array.isArray(serialNos)) return [];
+    const normalized = serialNos.map((s) => String(s).trim()).filter(Boolean);
+    return [...new Set(normalized)];
+  }
+
+  private async assertUniqueProductSerials(
+    tx: Prisma.TransactionClient,
+    customerId: string,
+    productId: string,
+    serialNos?: string[],
+  ) {
+    const normalized = this.normalizeSerialNos(serialNos);
+    if (normalized.length === 0) return;
+
+    const values = Prisma.join(normalized.map((s) => Prisma.sql`${s}`));
+    const duplicates = await tx.$queryRaw<Array<{ serialNo: string }>>`
+      SELECT DISTINCT "serialNo" FROM (
+        SELECT sns.sn AS "serialNo"
+        FROM inbound_receipts ir
+        CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(ir.serial_nos, '[]'::jsonb)) AS sns(sn)
+        WHERE ir.customer_id = ${customerId}
+          AND ir.product_id = ${productId}
+          AND sns.sn IN (${values})
+
+        UNION
+
+        SELECT sns.sn AS "serialNo"
+        FROM material_transformations mt
+        CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(mt.output_serial_nos, '[]'::jsonb)) AS sns(sn)
+        WHERE mt.customer_id = ${customerId}
+          AND mt.output_product_id = ${productId}
+          AND sns.sn IN (${values})
+
+        UNION
+
+        SELECT sns.sn AS "serialNo"
+        FROM outbound_tasks ot
+        JOIN sales_orders so ON so.id = ot.sales_order_id
+        CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(ot.serial_nos, '[]'::jsonb)) AS sns(sn)
+        WHERE so.customer_id = ${customerId}
+          AND ot.product_id = ${productId}
+          AND ot.status = 'DONE'
+          AND sns.sn IN (${values})
+      ) d
+    `;
+
+    if (duplicates.length > 0) {
+      const sample = duplicates.map((d) => d.serialNo).slice(0, 5).join(', ');
+      throw new BadRequestException(`Serial already used for this customer/product: ${sample}`);
+    }
   }
 
   private isSystemAdministrator(user?: JwtPayload): boolean {
@@ -387,4 +472,48 @@ export class InboundService {
       throw new BadRequestException('One or more UOM are invalid or inactive');
     }
   }
+
+  private async prepareProductQtyForInbound(
+    db: PrismaService | Prisma.TransactionClient,
+    customerId: string,
+    productId: string,
+    uomId: string | undefined,
+    qty: number,
+  ) {
+    const product = await db.product.findUnique({
+      where: { id: productId },
+      select: { id: true, customerId: true, baseUomId: true },
+    });
+    if (!product || product.customerId !== customerId || !product.baseUomId) {
+      throw new BadRequestException('Product base UOM is not configured');
+    }
+    const effectiveUomId = (uomId || product.baseUomId).trim();
+    if (effectiveUomId === product.baseUomId) {
+      return {
+        uomId: product.baseUomId,
+        qtyInput: new Prisma.Decimal(qty),
+        conversionFactor: new Prisma.Decimal(1),
+        qtyBase: new Prisma.Decimal(qty),
+      };
+    }
+    const conversion = await db.productUomConversion.findFirst({
+      where: {
+        productId,
+        fromUomId: effectiveUomId,
+        toUomId: product.baseUomId,
+        isActive: true,
+      },
+      select: { factor: true },
+    });
+    if (!conversion) {
+      throw new BadRequestException('Missing active UOM conversion for selected product');
+    }
+    return {
+      uomId: effectiveUomId,
+      qtyInput: new Prisma.Decimal(qty),
+      conversionFactor: conversion.factor,
+      qtyBase: new Prisma.Decimal(qty).mul(conversion.factor),
+    };
+  }
 }
+

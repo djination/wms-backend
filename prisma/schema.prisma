@@ -14,6 +14,8 @@ model User {
   name         String?
   operatorCompanyId String? @map("operator_company_id")
   isActive     Boolean  @default(true) @map("is_active")
+  canAccessWeb Boolean  @default(true) @map("can_access_web")
+  canAccessMobile Boolean @default(false) @map("can_access_mobile")
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
   operatorCompany OperatorCompany? @relation(fields: [operatorCompanyId], references: [id])
@@ -184,6 +186,7 @@ model Customer {
   salesOrders SalesOrder[]
   outboundAllocations OutboundAllocation[]
   outboundEvents OutboundEventLog[]
+  processFlowEvents ProcessFlowEventLog[]
   internalTransfers InternalTransfer[]
   materialTransformations MaterialTransformation[]
   recipes      ProcessRecipe[]
@@ -211,6 +214,7 @@ model OperatorCompany {
   operatedWarehouses  Warehouse[] @relation("WarehouseOperator")
   billingTransactions BillingTransaction[]
   outboundEvents OutboundEventLog[]
+  processFlowEvents ProcessFlowEventLog[]
   pics                OperatorCompanyPic[]
   users               User[]
 
@@ -252,6 +256,7 @@ model Warehouse {
   outboundTasks     OutboundTask[]
   outboundAllocations OutboundAllocation[]
   outboundEvents    OutboundEventLog[]
+  processFlowEvents ProcessFlowEventLog[]
   transfersFrom     InternalTransfer[] @relation("TransferFromWarehouse")
   transfersTo       InternalTransfer[] @relation("TransferToWarehouse")
   transformations   MaterialTransformation[]
@@ -388,12 +393,14 @@ model WarehouseBin {
 model Product {
   id          String            @id @default(uuid())
   customerId  String            @map("customer_id")
+  baseUomId   String?           @map("base_uom_id")
   sku         String
   name        String
   isActive    Boolean           @default(true) @map("is_active")
   createdAt   DateTime          @default(now()) @map("created_at")
   updatedAt   DateTime          @updatedAt @map("updated_at")
   customer    Customer          @relation(fields: [customerId], references: [id])
+  baseUom     UnitOfMeasure?    @relation("ProductBaseUom", fields: [baseUomId], references: [id])
   inventories InventoryBalance[]
   inboundItems InboundAsnItem[]
   inboundReceipts InboundReceipt[]
@@ -406,9 +413,11 @@ model Product {
   recipeLines ProcessRecipeLine[]
   recipeHeaders ProcessRecipe[] @relation("RecipeOutputProduct")
   supplierMappings ProductSupplier[]
+  uomConversions ProductUomConversion[]
 
   @@unique([customerId, sku])
   @@index([customerId, isActive])
+  @@index([baseUomId])
   @@map("products")
 }
 
@@ -422,9 +431,37 @@ model UnitOfMeasure {
   updatedAt   DateTime @updatedAt @map("updated_at")
   inboundAsnItems InboundAsnItem[]
   inboundReceipts InboundReceipt[]
+  baseForProducts Product[] @relation("ProductBaseUom")
+  transferLines InternalTransferLine[]
+  conversionFrom ProductUomConversion[] @relation("ProductUomConversionFromUom")
+  conversionTo ProductUomConversion[] @relation("ProductUomConversionToUom")
+  transformationOutputs MaterialTransformation[] @relation("TransformationOutputUom")
+  transformationInputs MaterialTransformationInput[] @relation("TransformationInputUom")
+  outboundTasks OutboundTask[]
 
   @@index([isActive])
   @@map("unit_of_measures")
+}
+
+model ProductUomConversion {
+  id          String   @id @default(uuid())
+  productId   String   @map("product_id")
+  fromUomId   String   @map("from_uom_id")
+  toUomId     String   @map("to_uom_id")
+  factor      Decimal  @db.Decimal(18, 6)
+  isActive    Boolean  @default(true) @map("is_active")
+  note        String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  product     Product  @relation(fields: [productId], references: [id])
+  fromUom     UnitOfMeasure @relation("ProductUomConversionFromUom", fields: [fromUomId], references: [id])
+  toUom       UnitOfMeasure @relation("ProductUomConversionToUom", fields: [toUomId], references: [id])
+
+  @@unique([productId, fromUomId, toUomId])
+  @@index([productId, isActive])
+  @@index([fromUomId])
+  @@index([toUomId])
+  @@map("product_uom_conversions")
 }
 
 model Supplier {
@@ -519,6 +556,7 @@ model InternalTransfer {
   fromWarehouse   Warehouse              @relation("TransferFromWarehouse", fields: [fromWarehouseId], references: [id])
   toWarehouse     Warehouse              @relation("TransferToWarehouse", fields: [toWarehouseId], references: [id])
   lines           InternalTransferLine[]
+  eventLogs       ProcessFlowEventLog[]
 
   @@index([customerId, status])
   @@index([fromWarehouseId, status])
@@ -533,15 +571,20 @@ model InternalTransferLine {
   sourceBinId        String           @map("source_bin_id")
   destinationBinId   String           @map("destination_bin_id")
   qty                Decimal          @db.Decimal(18, 4)
+  uomId              String?          @map("uom_id")
+  qtyBase            Decimal?         @map("qty_base") @db.Decimal(18, 4)
+  conversionFactor   Decimal?         @map("conversion_factor") @db.Decimal(18, 6)
   createdAt          DateTime         @default(now()) @map("created_at")
   updatedAt          DateTime         @updatedAt @map("updated_at")
   transfer           InternalTransfer @relation(fields: [transferId], references: [id])
   product            Product          @relation(fields: [productId], references: [id])
   sourceBin          WarehouseBin     @relation("TransferLineSourceBin", fields: [sourceBinId], references: [id])
   destinationBin     WarehouseBin     @relation("TransferLineDestinationBin", fields: [destinationBinId], references: [id])
+  uom                UnitOfMeasure?   @relation(fields: [uomId], references: [id])
 
   @@index([transferId])
   @@index([productId])
+  @@index([uomId])
   @@map("internal_transfer_lines")
 }
 
@@ -553,6 +596,12 @@ model MaterialTransformation {
   outputProductId   String                       @map("output_product_id")
   outputBinId       String                       @map("output_bin_id")
   qtyOutput         Decimal                      @map("qty_output") @db.Decimal(18, 4)
+  outputUomId       String?                      @map("output_uom_id")
+  qtyOutputInput    Decimal?                     @map("qty_output_input") @db.Decimal(18, 4)
+  outputConversionFactor Decimal?                @map("output_conversion_factor") @db.Decimal(18, 6)
+  outputLotNo       String?                      @map("output_lot_no")
+  outputBatchNo     String?                      @map("output_batch_no")
+  outputSerialNos   Json?                        @map("output_serial_nos")
   status            MaterialTransformationStatus @default(DRAFT)
   note              String?
   completedAt       DateTime?                    @map("completed_at")
@@ -562,12 +611,15 @@ model MaterialTransformation {
   warehouse         Warehouse                    @relation(fields: [warehouseId], references: [id])
   outputProduct     Product                      @relation("TransformationOutputProduct", fields: [outputProductId], references: [id])
   outputBin         WarehouseBin                 @relation("TransformationOutputBin", fields: [outputBinId], references: [id])
+  outputUom         UnitOfMeasure?               @relation("TransformationOutputUom", fields: [outputUomId], references: [id])
   recipeId          String?                      @map("recipe_id")
   recipe            ProcessRecipe?               @relation(fields: [recipeId], references: [id])
   inputs            MaterialTransformationInput[]
+  eventLogs         ProcessFlowEventLog[]
 
   @@index([customerId, status])
   @@index([warehouseId, status])
+  @@index([outputUomId])
   @@map("material_transformations")
 }
 
@@ -612,15 +664,23 @@ model MaterialTransformationInput {
   transformationId  String                 @map("transformation_id")
   productId         String                 @map("product_id")
   binId             String                 @map("bin_id")
+  lotNo             String?                @map("lot_no")
+  batchNo           String?                @map("batch_no")
+  serialNos         Json?                  @map("serial_nos")
   qtyConsumed       Decimal                @map("qty_consumed") @db.Decimal(18, 4)
+  uomId             String?                @map("uom_id")
+  qtyConsumedInput  Decimal?               @map("qty_consumed_input") @db.Decimal(18, 4)
+  conversionFactor  Decimal?               @map("conversion_factor") @db.Decimal(18, 6)
   createdAt         DateTime               @default(now()) @map("created_at")
   updatedAt         DateTime               @updatedAt @map("updated_at")
   transformation    MaterialTransformation @relation(fields: [transformationId], references: [id])
   product           Product                @relation(fields: [productId], references: [id])
   bin               WarehouseBin           @relation(fields: [binId], references: [id])
+  uom               UnitOfMeasure?         @relation("TransformationInputUom", fields: [uomId], references: [id])
 
   @@index([transformationId])
   @@index([productId])
+  @@index([uomId])
   @@map("material_transformation_inputs")
 }
 
@@ -653,6 +713,8 @@ model InboundAsnItem {
   uomId         String      @map("uom_id")
   qtyExpected   Decimal     @map("qty_expected") @db.Decimal(18, 4)
   qtyReceived   Decimal     @default(0) @map("qty_received") @db.Decimal(18, 4)
+  qtyExpectedBase Decimal   @default(0) @map("qty_expected_base") @db.Decimal(18, 4)
+  qtyReceivedBase Decimal   @default(0) @map("qty_received_base") @db.Decimal(18, 4)
   createdAt     DateTime    @default(now()) @map("created_at")
   updatedAt     DateTime    @updatedAt @map("updated_at")
   inboundAsn    InboundAsn  @relation(fields: [inboundAsnId], references: [id])
@@ -678,6 +740,12 @@ model InboundReceipt {
   productId      String         @map("product_id")
   uomId          String         @map("uom_id")
   qtyReceived    Decimal        @map("qty_received") @db.Decimal(18, 4)
+  qtyReceivedInput Decimal?     @map("qty_received_input") @db.Decimal(18, 4)
+  conversionFactor Decimal?     @map("conversion_factor") @db.Decimal(18, 6)
+  lotNo          String?        @map("lot_no")
+  batchNo        String?        @map("batch_no")
+  serialNos      Json?          @map("serial_nos")
+  expiryDate     DateTime?      @map("expiry_date")
   note           String?
   receivedAt     DateTime       @default(now()) @map("received_at")
   createdAt      DateTime       @default(now()) @map("created_at")
@@ -796,7 +864,11 @@ model OutboundTask {
   taskType        OutboundTaskType   @map("task_type")
   status          OutboundTaskStatus @default(OPEN)
   qtyTask         Decimal            @map("qty_task") @db.Decimal(18, 4)
+  uomId           String?            @map("uom_id")
+  qtyTaskInput    Decimal?           @map("qty_task_input") @db.Decimal(18, 4)
+  conversionFactor Decimal?          @map("conversion_factor") @db.Decimal(18, 6)
   qtyDone         Decimal            @default(0) @map("qty_done") @db.Decimal(18, 4)
+  serialNos       Json?              @map("serial_nos")
   assignedTo      String?            @map("assigned_to")
   completedAt     DateTime?          @map("completed_at")
   createdAt       DateTime           @default(now()) @map("created_at")
@@ -806,6 +878,7 @@ model OutboundTask {
   wave            OutboundWave?      @relation(fields: [waveId], references: [id])
   warehouse       Warehouse          @relation(fields: [warehouseId], references: [id])
   product         Product            @relation(fields: [productId], references: [id])
+  uom             UnitOfMeasure?     @relation(fields: [uomId], references: [id])
   sourceBin       WarehouseBin?      @relation("OutboundSourceBin", fields: [sourceBinId], references: [id])
   eventLogs       OutboundEventLog[]
 
@@ -814,6 +887,7 @@ model OutboundTask {
   @@index([waveId])
   @@index([warehouseId])
   @@index([productId])
+  @@index([uomId])
   @@index([sourceBinId])
   @@map("outbound_tasks")
 }
@@ -840,6 +914,31 @@ model OutboundEventLog {
   @@index([warehouseId, createdAt])
   @@index([customerId, createdAt])
   @@map("outbound_event_logs")
+}
+
+model ProcessFlowEventLog {
+  id                       String                  @id @default(uuid())
+  eventCode                String                  @map("event_code")
+  processType              String                  @map("process_type")
+  customerId               String                  @map("customer_id")
+  warehouseId              String                  @map("warehouse_id")
+  operatorCompanyId        String?                 @map("operator_company_id")
+  internalTransferId       String?                 @map("internal_transfer_id")
+  materialTransformationId String?                 @map("material_transformation_id")
+  note                     String?
+  metadata                 Json?
+  createdAt                DateTime                @default(now()) @map("created_at")
+  customer                 Customer                @relation(fields: [customerId], references: [id])
+  warehouse                Warehouse               @relation(fields: [warehouseId], references: [id])
+  operatorCompany          OperatorCompany?        @relation(fields: [operatorCompanyId], references: [id])
+  internalTransfer         InternalTransfer?       @relation(fields: [internalTransferId], references: [id])
+  materialTransformation   MaterialTransformation? @relation(fields: [materialTransformationId], references: [id])
+
+  @@index([customerId, createdAt])
+  @@index([warehouseId, createdAt])
+  @@index([internalTransferId, createdAt])
+  @@index([materialTransformationId, createdAt])
+  @@map("process_flow_event_logs")
 }
 
 model BillingContract {
@@ -908,3 +1007,4 @@ model BillingTransaction {
   @@index([occurredAt])
   @@map("billing_transactions")
 }
+

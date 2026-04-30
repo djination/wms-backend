@@ -33,4 +33,14 @@ export class UpdateUserDto {
   @IsArray()
   @IsUUID(undefined, { each: true })
   warehouseIds?: string[];
+
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @IsBoolean()
+  canAccessWeb?: boolean;
+
+  @ApiPropertyOptional({ example: false })
+  @IsOptional()
+  @IsBoolean()
+  canAccessMobile?: boolean;
 }

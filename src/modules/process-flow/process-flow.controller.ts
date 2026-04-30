@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
@@ -7,6 +7,7 @@ import { CreateInternalTransferDto } from './dto/create-internal-transfer.dto';
 import { CreateMaterialTransformationDto } from './dto/create-material-transformation.dto';
 import { CreateProcessRecipeDto } from './dto/create-process-recipe.dto';
 import { CreateTransformationFromRecipeDto } from './dto/create-transformation-from-recipe.dto';
+import { ProcessGenealogyQueryDto } from './dto/process-genealogy-query.dto';
 import { UpdateProcessRecipeDto } from './dto/update-process-recipe.dto';
 import { ProcessFlowService } from './process-flow.service';
 
@@ -39,6 +40,30 @@ export class ProcessFlowController {
   @ApiOperation({ summary: 'List material transformations' })
   listTransformations(@CurrentUser() user: JwtPayload) {
     return this.service.listTransformations(user);
+  }
+
+  @Get('events')
+  @ApiOperation({ summary: 'List process flow event logs' })
+  listEvents(@CurrentUser() user: JwtPayload, @Query('processType') processType?: string) {
+    return this.service.listEvents(user, processType);
+  }
+
+  @Get('genealogy')
+  @ApiOperation({ summary: 'Trace transformation genealogy by output lot/batch or transformation ID' })
+  genealogy(@CurrentUser() user: JwtPayload, @Query() query: ProcessGenealogyQueryDto) {
+    return this.service.genealogy(user, query);
+  }
+
+  @Get('billing-summary')
+  @ApiOperation({ summary: 'Get process flow billing summary' })
+  billingSummary(@CurrentUser() user: JwtPayload) {
+    return this.service.billingSummary(user);
+  }
+
+  @Post('billing/post-drafts')
+  @ApiOperation({ summary: 'Post (finalize) draft billing transactions for process flow activities in scope' })
+  postDraftBilling(@CurrentUser() user: JwtPayload) {
+    return this.service.postDraftProcessFlowBilling(user);
   }
 
   @Post('transformations')

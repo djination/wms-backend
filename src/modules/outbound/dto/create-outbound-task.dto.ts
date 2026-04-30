@@ -1,7 +1,7 @@
 import { OutboundTaskType } from '@prisma/client';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsEnum, IsNumber, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
+import { IsArray, IsEnum, IsNumber, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 
 export class CreateOutboundTaskDto {
   @ApiProperty()
@@ -33,7 +33,18 @@ export class CreateOutboundTaskDto {
 
   @ApiPropertyOptional()
   @IsOptional()
+  @IsUUID()
+  uomId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsString()
   @MaxLength(100)
   assignedTo?: string;
+
+  @ApiPropertyOptional({ type: [String], example: ['SN-PLAN-001', 'SN-PLAN-002'] })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  serialNos?: string[];
 }

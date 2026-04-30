@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsNumber, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
+import { IsArray, IsDateString, IsNumber, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 
 export class ReceiveAsnItemDto {
   @ApiProperty({ example: '8f13f740-f338-476f-9ece-78f4f6830ee3' })
@@ -23,6 +23,34 @@ export class ReceiveAsnItemDto {
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 4 })
   qtyReceived!: number;
+
+  @ApiPropertyOptional({ example: '6fe3afec-2be1-4937-bbab-2b3bfeeb9ddd' })
+  @IsOptional()
+  @IsUUID()
+  uomId?: string;
+
+  @ApiPropertyOptional({ example: 'LOT-NTI-20260430-A' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  lotNo?: string;
+
+  @ApiPropertyOptional({ example: 'BATCH-20260430-01' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  batchNo?: string;
+
+  @ApiPropertyOptional({ example: '2027-04-30T00:00:00.000Z' })
+  @IsOptional()
+  @IsDateString()
+  expiryDate?: string;
+
+  @ApiPropertyOptional({ type: [String], example: ['SN-001', 'SN-002'] })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  serialNos?: string[];
 
   @ApiPropertyOptional({ example: 'Good condition' })
   @IsOptional()

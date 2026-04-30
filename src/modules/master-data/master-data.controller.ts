@@ -22,8 +22,11 @@ import { UpdateWarehouseDto } from './dto/update-warehouse.dto';
 import { UpdateZoneDto } from './dto/update-zone.dto';
 import { UpdateSupplierDto } from './dto/update-supplier.dto';
 import { CreateUomDto } from './dto/create-uom.dto';
+import { CreateProductUomConversionDto } from './dto/create-product-uom-conversion.dto';
 import { UpdateUomDto } from './dto/update-uom.dto';
+import { UpdateProductUomConversionDto } from './dto/update-product-uom-conversion.dto';
 import { UpsertInventoryDto } from './dto/upsert-inventory.dto';
+import { ListProductUomConversionsDto } from './dto/list-product-uom-conversions.dto';
 import { MasterDataService } from './master-data.service';
 
 @ApiTags('master-data')
@@ -259,6 +262,34 @@ export class MasterDataController {
   @ApiOperation({ summary: 'List inventory balance by customer/warehouse/bin/product' })
   listInventoryBalances(@CurrentUser() user: JwtPayload) {
     return this.service.listInventoryBalances(user);
+  }
+
+  @Get('product-uom-conversions')
+  @ApiOperation({ summary: 'List product-specific UOM conversions' })
+  listProductUomConversions(@Query() query: ListProductUomConversionsDto, @CurrentUser() user: JwtPayload) {
+    return this.service.listProductUomConversions(query, user);
+  }
+
+  @Post('product-uom-conversions')
+  @ApiOperation({ summary: 'Create product-specific UOM conversion' })
+  createProductUomConversion(@Body() dto: CreateProductUomConversionDto, @CurrentUser() user: JwtPayload) {
+    return this.service.createProductUomConversion(dto, user);
+  }
+
+  @Patch('product-uom-conversions/:id')
+  @ApiOperation({ summary: 'Update product-specific UOM conversion' })
+  updateProductUomConversion(
+    @Param('id') id: string,
+    @Body() dto: UpdateProductUomConversionDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.service.updateProductUomConversion(id, dto, user);
+  }
+
+  @Delete('product-uom-conversions/:id')
+  @ApiOperation({ summary: 'Delete product-specific UOM conversion (soft/hard)' })
+  deleteProductUomConversion(@Param('id') id: string, @Query() query: DeleteMasterDataDto, @CurrentUser() user: JwtPayload) {
+    return this.service.deleteProductUomConversion(id, query.mode ?? DeleteMode.SOFT, user);
   }
 
   @Post('inventory-balances')

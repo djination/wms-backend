@@ -43,7 +43,16 @@ export class OutboundService {
       include: {
         customer: true,
         warehouse: true,
-        items: { include: { product: true } },
+        items: {
+          include: {
+            product: {
+              include: {
+                baseUom: true,
+                uomConversions: { where: { isActive: true }, include: { fromUom: true, toUom: true } },
+              },
+            },
+          },
+        },
         tasks: { orderBy: { createdAt: 'desc' }, take: 30 },
       },
       orderBy: [{ createdAt: 'desc' }],
@@ -290,6 +299,7 @@ export class OutboundService {
         salesOrderItem: { include: { product: true } },
         wave: true,
         warehouse: true,
+        uom: true,
         sourceBin: true,
       },
       orderBy: [{ createdAt: 'desc' }],
@@ -347,6 +357,7 @@ export class OutboundService {
 
   async createTask(dto: CreateOutboundTaskDto, user?: JwtPayload) {
     if (dto.qtyTask <= 0) throw new BadRequestException('qtyTask must be greater than zero');
+    const normalizedPlanSerials = this.normalizeSerialNos(dto.serialNos);
 
     return this.prisma.$transaction(async (tx) => {
       const order = await tx.salesOrder.findUnique({
@@ -366,6 +377,22 @@ export class OutboundService {
       if (!item || item.salesOrderId !== dto.salesOrderId) {
         throw new BadRequestException('Sales order item is invalid');
       }
+      const preparedTaskQty = await this.prepareProductQtyForOutbound(
+        tx,
+        order.customerId,
+        item.productId,
+        dto.uomId,
+        dto.qtyTask,
+      );
+      if (normalizedPlanSerials.length > 0 && new Prisma.Decimal(normalizedPlanSerials.length).greaterThan(preparedTaskQty.qtyBase)) {
+        throw new BadRequestException('Serial count cannot exceed qtyTask');
+      }
+      await this.assertReservableProductSerials(
+        tx,
+        order.customerId,
+        item.productId,
+        normalizedPlanSerials,
+      );
 
       if (dto.waveId) {
         const wave = await tx.outboundWave.findUnique({
@@ -396,7 +423,11 @@ export class OutboundService {
           productId: item.productId,
           sourceBinId: dto.sourceBinId,
           taskType: dto.taskType,
-          qtyTask: new Prisma.Decimal(dto.qtyTask),
+          qtyTask: preparedTaskQty.qtyBase,
+          uomId: preparedTaskQty.uomId,
+          qtyTaskInput: preparedTaskQty.qtyInput,
+          conversionFactor: preparedTaskQty.conversionFactor,
+          serialNos: normalizedPlanSerials.length > 0 ? normalizedPlanSerials : undefined,
           assignedTo: dto.assignedTo?.trim(),
         },
       });
@@ -420,8 +451,12 @@ export class OutboundService {
         eventCode: 'TASK_CREATED',
         metadata: {
           taskType: dto.taskType,
-          qtyTask: dto.qtyTask,
+          qtyTaskInput: dto.qtyTask,
+          qtyTaskBase: preparedTaskQty.qtyBase.toString(),
+          uomId: preparedTaskQty.uomId,
+          conversionFactor: preparedTaskQty.conversionFactor.toString(),
           sourceBinId: dto.sourceBinId ?? null,
+          serialNos: normalizedPlanSerials,
         },
       });
 
@@ -445,9 +480,38 @@ export class OutboundService {
       }
 
       const remaining = new Prisma.Decimal(task.qtyTask).minus(task.qtyDone);
-      const toComplete = dto.qtyDone !== undefined ? new Prisma.Decimal(dto.qtyDone) : remaining;
+      let toComplete = remaining;
+      let qtyDoneInput = remaining;
+      let qtyDoneUomId: string | null = null;
+      let qtyDoneConversionFactor = new Prisma.Decimal(1);
+      if (dto.qtyDone !== undefined) {
+        const preparedDoneQty = await this.prepareProductQtyForOutbound(
+          tx,
+          task.salesOrder.customerId,
+          task.productId,
+          dto.uomId ?? task.uomId ?? undefined,
+          dto.qtyDone,
+        );
+        toComplete = preparedDoneQty.qtyBase;
+        qtyDoneInput = preparedDoneQty.qtyInput;
+        qtyDoneUomId = preparedDoneQty.uomId;
+        qtyDoneConversionFactor = preparedDoneQty.conversionFactor;
+      }
       if (toComplete.lte(0)) throw new BadRequestException('qtyDone must be greater than zero');
       if (toComplete.greaterThan(remaining)) throw new BadRequestException('qtyDone exceeds remaining task quantity');
+      const taskSerials = this.jsonToStringArray(task.serialNos);
+      const requestedSerials = this.normalizeSerialNos(dto.serialNos);
+      const effectiveSerials = requestedSerials.length > 0 ? requestedSerials : taskSerials;
+      if (effectiveSerials.length > 0 && new Prisma.Decimal(effectiveSerials.length).greaterThan(toComplete)) {
+        throw new BadRequestException('Serial count cannot exceed qtyDone');
+      }
+      await this.assertReservableProductSerials(
+        tx,
+        task.salesOrder.customerId,
+        task.productId,
+        effectiveSerials,
+        task.id,
+      );
 
       const nextQtyDone = new Prisma.Decimal(task.qtyDone).plus(toComplete);
       const done = nextQtyDone.equals(task.qtyTask);
@@ -455,6 +519,7 @@ export class OutboundService {
         where: { id: task.id },
         data: {
           qtyDone: nextQtyDone,
+          serialNos: effectiveSerials.length > 0 ? effectiveSerials : undefined,
           status: done ? OutboundTaskStatus.DONE : OutboundTaskStatus.IN_PROGRESS,
           completedAt: done ? new Date() : null,
         },
@@ -505,8 +570,12 @@ export class OutboundService {
           eventCode: 'TASK_COMPLETED',
           metadata: {
             taskType: task.taskType,
-            qtyDone: toComplete.toString(),
+            qtyDoneInput: qtyDoneInput.toString(),
+            qtyDoneUomId,
+            qtyDoneConversionFactor: qtyDoneConversionFactor.toString(),
+            qtyDoneBase: toComplete.toString(),
             qtyTask: task.qtyTask.toString(),
+            serialNos: effectiveSerials,
           },
         });
         await this.createOutboundBillingTransaction(tx, {
@@ -543,12 +612,42 @@ export class OutboundService {
   async updateTask(id: string, dto: UpdateOutboundTaskDto, user?: JwtPayload) {
     const task = await this.prisma.outboundTask.findUnique({
       where: { id },
-      select: { id: true, status: true, warehouseId: true },
+      select: {
+        id: true,
+        status: true,
+        warehouseId: true,
+        qtyTask: true,
+        qtyDone: true,
+        productId: true,
+        serialNos: true,
+        salesOrder: { select: { customerId: true } },
+      },
     });
     if (!task) throw new BadRequestException('Task not found');
     this.assertWarehouseAllowed(user, task.warehouseId);
     if (task.status === OutboundTaskStatus.DONE && dto.status !== OutboundTaskStatus.DONE) {
       throw new BadRequestException('Done task cannot be reopened');
+    }
+    const hasSerialField = Object.prototype.hasOwnProperty.call(dto, 'serialNos');
+    let nextSerialNos: string[] | undefined;
+    if (hasSerialField) {
+      const normalized = this.normalizeSerialNos(dto.serialNos);
+      const qtyTask = new Prisma.Decimal(task.qtyTask);
+      const qtyDone = new Prisma.Decimal(task.qtyDone);
+      if (normalized.length > 0 && new Prisma.Decimal(normalized.length).greaterThan(qtyTask)) {
+        throw new BadRequestException('Serial count cannot exceed qtyTask');
+      }
+      if (new Prisma.Decimal(normalized.length).lessThan(qtyDone)) {
+        throw new BadRequestException('Serial count cannot be lower than qtyDone');
+      }
+      await this.assertReservableProductSerials(
+        this.prisma,
+        task.salesOrder.customerId,
+        task.productId,
+        normalized,
+        task.id,
+      );
+      nextSerialNos = normalized;
     }
 
     return this.prisma.outboundTask.update({
@@ -556,12 +655,22 @@ export class OutboundService {
       data: {
         assignedTo: dto.assignedTo?.trim(),
         status: dto.status,
+        serialNos: hasSerialField ? (nextSerialNos && nextSerialNos.length > 0 ? nextSerialNos : Prisma.JsonNull) : undefined,
         completedAt:
           dto.status === OutboundTaskStatus.DONE ? new Date() : dto.status === OutboundTaskStatus.CANCELLED ? null : undefined,
       },
       include: {
         salesOrder: true,
-        salesOrderItem: { include: { product: true } },
+        salesOrderItem: {
+          include: {
+            product: {
+              include: {
+                baseUom: true,
+                uomConversions: { where: { isActive: true }, include: { fromUom: true, toUom: true } },
+              },
+            },
+          },
+        },
         wave: true,
         warehouse: true,
         sourceBin: true,
@@ -806,6 +915,123 @@ export class OutboundService {
 
   private periodKeyFromDate(date: Date): string {
     return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+  }
+
+  private jsonToStringArray(value: Prisma.JsonValue | null | undefined): string[] {
+    if (!Array.isArray(value)) return [];
+    return value.map((v) => String(v).trim()).filter(Boolean);
+  }
+
+  private normalizeSerialNos(serialNos?: string[]): string[] {
+    if (!Array.isArray(serialNos)) return [];
+    const normalized = serialNos.map((s) => String(s).trim()).filter(Boolean);
+    return [...new Set(normalized)];
+  }
+
+  private async prepareProductQtyForOutbound(
+    db: PrismaService | Prisma.TransactionClient,
+    customerId: string,
+    productId: string,
+    uomId: string | undefined,
+    qty: number,
+  ) {
+    const product = await db.product.findUnique({
+      where: { id: productId },
+      select: { id: true, customerId: true, baseUomId: true },
+    });
+    if (!product || product.customerId !== customerId || !product.baseUomId) {
+      throw new BadRequestException('Product base UOM is not configured');
+    }
+    const effectiveUomId = (uomId || product.baseUomId).trim();
+    if (effectiveUomId === product.baseUomId) {
+      return {
+        uomId: product.baseUomId,
+        qtyInput: new Prisma.Decimal(qty),
+        conversionFactor: new Prisma.Decimal(1),
+        qtyBase: new Prisma.Decimal(qty),
+      };
+    }
+    const conversion = await db.productUomConversion.findFirst({
+      where: {
+        productId,
+        fromUomId: effectiveUomId,
+        toUomId: product.baseUomId,
+        isActive: true,
+      },
+      select: { factor: true },
+    });
+    if (!conversion) {
+      throw new BadRequestException('Missing active UOM conversion for selected product');
+    }
+    return {
+      uomId: effectiveUomId,
+      qtyInput: new Prisma.Decimal(qty),
+      conversionFactor: conversion.factor,
+      qtyBase: new Prisma.Decimal(qty).mul(conversion.factor),
+    };
+  }
+
+  private async assertReservableProductSerials(
+    tx: Prisma.TransactionClient | PrismaService,
+    customerId: string,
+    productId: string,
+    serialNos?: string[],
+    excludeTaskId?: string,
+  ) {
+    const normalized = this.normalizeSerialNos(serialNos);
+    if (normalized.length === 0) return;
+    const values = Prisma.join(normalized.map((s) => Prisma.sql`${s}`));
+    const traceRows = await tx.$queryRaw<Array<{ serialNo: string }>>`
+      SELECT DISTINCT "serialNo" FROM (
+        SELECT sns.sn AS "serialNo"
+        FROM inbound_receipts ir
+        CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(ir.serial_nos, '[]'::jsonb)) AS sns(sn)
+        WHERE ir.customer_id = ${customerId}
+          AND ir.product_id = ${productId}
+          AND sns.sn IN (${values})
+
+        UNION
+
+        SELECT sns.sn AS "serialNo"
+        FROM material_transformations mt
+        CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(mt.output_serial_nos, '[]'::jsonb)) AS sns(sn)
+        WHERE mt.customer_id = ${customerId}
+          AND mt.output_product_id = ${productId}
+          AND sns.sn IN (${values})
+      ) d
+    `;
+
+    const conflictingTasks = await tx.$queryRaw<
+      Array<{ serialNo: string; taskId: string; taskStatus: string; orderNo: string | null }>
+    >`
+      SELECT DISTINCT
+        sns.sn AS "serialNo",
+        ot.id AS "taskId",
+        ot.status::text AS "taskStatus",
+        so.order_no AS "orderNo"
+      FROM outbound_tasks ot
+      JOIN sales_orders so ON so.id = ot.sales_order_id
+      CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(ot.serial_nos, '[]'::jsonb)) AS sns(sn)
+      WHERE so.customer_id = ${customerId}
+        AND ot.product_id = ${productId}
+        AND ot.status IN ('OPEN', 'IN_PROGRESS', 'DONE')
+        AND (${excludeTaskId ?? null} IS NULL OR ot.id <> ${excludeTaskId ?? null})
+        AND sns.sn IN (${values})
+    `;
+    if (conflictingTasks.length > 0) {
+      const sample = conflictingTasks
+        .slice(0, 3)
+        .map((d) => `${d.serialNo}=>${d.orderNo ?? '-'}:${d.taskStatus}:${d.taskId.slice(0, 8)}`)
+        .join(', ');
+      throw new BadRequestException(`Serial already reserved/used for this customer/product (${sample})`);
+    }
+
+    const matched = new Set(traceRows.map((d) => d.serialNo));
+    const missing = normalized.filter((sn) => !matched.has(sn));
+    if (missing.length > 0) {
+      const sample = missing.slice(0, 5).join(', ');
+      throw new BadRequestException(`Serial not found in inbound/transformation trace: ${sample}`);
+    }
   }
 
   private async createOutboundBillingTransaction(

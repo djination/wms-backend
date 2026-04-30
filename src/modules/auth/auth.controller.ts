@@ -21,7 +21,7 @@ export class AuthController {
   @Post('login')
   @ApiOperation({ summary: 'Obtain JWT for API & third-party integration' })
   login(@Body() dto: LoginDto) {
-    return this.auth.login(dto.email, dto.password);
+    return this.auth.login(dto.email, dto.password, dto.platform);
   }
 
   @Get('me')
