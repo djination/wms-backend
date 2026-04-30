@@ -20,6 +20,10 @@ class InternalTransferLineDto {
   @IsNumber()
   @Min(0.0001)
   qty!: number;
+
+  @ApiProperty({ description: 'Input UOM used for this transfer line qty' })
+  @IsUUID()
+  uomId!: string;
 }
 
 export class CreateInternalTransferDto {

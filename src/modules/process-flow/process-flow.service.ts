@@ -4,6 +4,7 @@ import {
   BillingTransactionStatus,
   InternalTransferStatus,
   MaterialTransformationStatus,
+  OutboundTaskStatus,
   Prisma,
   WarehouseType,
 } from '@prisma/client';
@@ -14,6 +15,7 @@ import { CreateInternalTransferDto } from './dto/create-internal-transfer.dto';
 import { CreateMaterialTransformationDto } from './dto/create-material-transformation.dto';
 import { CreateProcessRecipeDto } from './dto/create-process-recipe.dto';
 import { CreateTransformationFromRecipeDto } from './dto/create-transformation-from-recipe.dto';
+import { ProcessGenealogyQueryDto } from './dto/process-genealogy-query.dto';
 import { UpdateProcessRecipeDto } from './dto/update-process-recipe.dto';
 
 @Injectable()
@@ -33,7 +35,7 @@ export class ProcessFlowService {
         customer: true,
         fromWarehouse: true,
         toWarehouse: true,
-        lines: { include: { product: true, sourceBin: true, destinationBin: true } },
+        lines: { include: { product: true, sourceBin: true, destinationBin: true, uom: true } },
       },
       orderBy: [{ createdAt: 'desc' }],
     });
@@ -51,6 +53,11 @@ export class ProcessFlowService {
       [dto.fromWarehouseId, dto.toWarehouseId],
       dto.lines.map((l) => l.productId),
     );
+    const preparedLines = await Promise.all(
+      dto.lines.map((line) =>
+        this.prepareTransferLine(dto.customerId, line.productId, line.uomId, line.qty),
+      ),
+    );
 
     try {
       const created = await this.prisma.internalTransfer.create({
@@ -61,11 +68,14 @@ export class ProcessFlowService {
           toWarehouseId: dto.toWarehouseId,
           note: dto.note?.trim(),
           lines: {
-            create: dto.lines.map((line) => ({
+            create: dto.lines.map((line, idx) => ({
               productId: line.productId,
               sourceBinId: line.sourceBinId,
               destinationBinId: line.destinationBinId,
               qty: new Prisma.Decimal(line.qty),
+              uomId: line.uomId,
+              qtyBase: preparedLines[idx].qtyBase,
+              conversionFactor: preparedLines[idx].conversionFactor,
             })),
           },
         },
@@ -73,7 +83,7 @@ export class ProcessFlowService {
           customer: true,
           fromWarehouse: true,
           toWarehouse: true,
-          lines: { include: { product: true, sourceBin: true, destinationBin: true } },
+          lines: { include: { product: true, sourceBin: true, destinationBin: true, uom: true } },
         },
       });
       await this.recordProcessFlowEvent(this.prisma, {
@@ -133,7 +143,8 @@ export class ProcessFlowService {
             },
           },
         });
-        if (!srcInv || new Prisma.Decimal(srcInv.qtyOnHand).lessThan(line.qty)) {
+        const qtyBase = line.qtyBase ?? line.qty;
+        if (!srcInv || new Prisma.Decimal(srcInv.qtyOnHand).lessThan(qtyBase)) {
           throw new BadRequestException('Insufficient source inventory for transfer');
         }
 
@@ -146,7 +157,7 @@ export class ProcessFlowService {
               productId: line.productId,
             },
           },
-          data: { qtyOnHand: { decrement: line.qty } },
+          data: { qtyOnHand: { decrement: qtyBase } },
         });
 
         await tx.inventoryBalance.upsert({
@@ -163,10 +174,10 @@ export class ProcessFlowService {
             warehouseId: transfer.toWarehouseId,
             binId: line.destinationBinId,
             productId: line.productId,
-            qtyOnHand: line.qty,
+            qtyOnHand: qtyBase,
           },
           update: {
-            qtyOnHand: { increment: line.qty },
+            qtyOnHand: { increment: qtyBase },
           },
         });
 
@@ -174,7 +185,7 @@ export class ProcessFlowService {
           customerId: transfer.customerId,
           warehouseId: transfer.fromWarehouseId,
           operatorCompanyId: user?.operatorCompanyId,
-          qty: line.qty,
+          qty: qtyBase,
           activityCode: 'PROC_TRANSFER_QTY',
           referenceType: 'INTERNAL_TRANSFER',
           referenceId: transfer.id,
@@ -193,7 +204,7 @@ export class ProcessFlowService {
           customer: true,
           fromWarehouse: true,
           toWarehouse: true,
-          lines: { include: { product: true, sourceBin: true, destinationBin: true } },
+          lines: { include: { product: true, sourceBin: true, destinationBin: true, uom: true } },
         },
       });
       await this.recordProcessFlowEvent(tx, {
@@ -219,7 +230,8 @@ export class ProcessFlowService {
         warehouse: true,
         outputProduct: true,
         outputBin: true,
-        inputs: { include: { product: true, bin: true } },
+        outputUom: true,
+        inputs: { include: { product: true, bin: true, uom: true } },
       },
       orderBy: [{ createdAt: 'desc' }],
     });
@@ -244,6 +256,182 @@ export class ProcessFlowService {
       orderBy: [{ createdAt: 'desc' }],
       take: 300,
     });
+  }
+
+  async genealogy(user: JwtPayload | undefined, query: ProcessGenealogyQueryDto) {
+    const byId = query.transformationId?.trim();
+    const byLot = query.outputLotNo?.trim();
+    const byBatch = query.outputBatchNo?.trim();
+    if (!byId && !byLot && !byBatch) {
+      throw new BadRequestException('Provide at least one filter: transformationId, outputLotNo, or outputBatchNo');
+    }
+
+    const warehouseIds = this.allowedWarehouseIds(user);
+    if (warehouseIds !== undefined && warehouseIds.length === 0) return [];
+
+    const transforms = await this.prisma.materialTransformation.findMany({
+      where: {
+        ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}),
+        ...(byId ? { id: byId } : {}),
+        ...(byLot ? { outputLotNo: byLot } : {}),
+        ...(byBatch ? { outputBatchNo: byBatch } : {}),
+      },
+      include: {
+        customer: { select: { id: true, code: true, name: true } },
+        warehouse: { select: { id: true, code: true, name: true } },
+        outputProduct: { select: { id: true, sku: true, name: true } },
+        outputBin: { select: { id: true, code: true, name: true } },
+        inputs: {
+          include: {
+            product: { select: { id: true, sku: true, name: true } },
+            bin: { select: { id: true, code: true, name: true } },
+          },
+        },
+      },
+      orderBy: [{ completedAt: 'desc' }, { createdAt: 'desc' }],
+      take: 100,
+    });
+
+    if (transforms.length === 0) return [];
+
+    const receiptWhereOr = transforms.flatMap((t) =>
+      t.inputs
+        .filter((i) => Boolean(i.lotNo || i.batchNo || i.serialNos))
+        .map((i) => ({
+          customerId: t.customerId,
+          warehouseId: t.warehouseId,
+          productId: i.productId,
+          binId: i.binId,
+          ...(i.lotNo ? { lotNo: i.lotNo } : {}),
+          ...(i.batchNo ? { batchNo: i.batchNo } : {}),
+        })),
+    );
+
+    const receipts =
+      receiptWhereOr.length === 0
+        ? []
+        : await this.prisma.inboundReceipt.findMany({
+            where: { OR: receiptWhereOr },
+            include: {
+              inboundAsn: { select: { id: true, asnNo: true } },
+              product: { select: { id: true, sku: true, name: true } },
+              uom: { select: { id: true, code: true, name: true } },
+            },
+            orderBy: [{ receivedAt: 'desc' }],
+            take: 1000,
+          });
+
+    const outboundDoneTasks = await this.prisma.outboundTask.findMany({
+      where: {
+        status: OutboundTaskStatus.DONE,
+        ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}),
+      },
+      include: {
+        salesOrder: { select: { id: true, orderNo: true, customerId: true, status: true } },
+        wave: { select: { id: true, waveNo: true } },
+      },
+      orderBy: [{ completedAt: 'desc' }],
+      take: 2000,
+    });
+
+    return transforms.map((t) => {
+      const mappedInputs = t.inputs.map((i) => {
+        const matchedReceipts = receipts.filter(
+          (r) =>
+            r.customerId === t.customerId &&
+            r.warehouseId === t.warehouseId &&
+            r.productId === i.productId &&
+            r.binId === i.binId &&
+            (i.lotNo ? r.lotNo === i.lotNo : true) &&
+            (i.batchNo ? r.batchNo === i.batchNo : true) &&
+            this.isSerialMatch(i.serialNos, r.serialNos),
+        );
+        return {
+          id: i.id,
+          product: i.product,
+          bin: i.bin,
+          qtyConsumed: i.qtyConsumed.toString(),
+          lotNo: i.lotNo ?? null,
+          batchNo: i.batchNo ?? null,
+          serialNos: this.jsonToStringArray(i.serialNos),
+          matchedInboundReceipts: matchedReceipts.map((r) => ({
+            id: r.id,
+            inboundAsnId: r.inboundAsnId,
+            inboundAsnNo: r.inboundAsn?.asnNo ?? null,
+            qtyReceived: r.qtyReceived.toString(),
+            receivedAt: r.receivedAt,
+            product: r.product,
+            lotNo: r.lotNo ?? null,
+            batchNo: r.batchNo ?? null,
+            serialNos: this.jsonToStringArray(r.serialNos),
+            expiryDate: r.expiryDate ?? null,
+            uom: r.uom,
+          })),
+        };
+      });
+
+      return {
+        id: t.id,
+        processNo: t.processNo,
+        status: t.status,
+        createdAt: t.createdAt,
+        completedAt: t.completedAt,
+        customer: t.customer,
+        warehouse: t.warehouse,
+        output: {
+          product: t.outputProduct,
+          bin: t.outputBin,
+          qtyOutput: t.qtyOutput.toString(),
+          lotNo: t.outputLotNo ?? null,
+          batchNo: t.outputBatchNo ?? null,
+          serialNos: this.jsonToStringArray(t.outputSerialNos),
+        },
+        matchedOutboundTasks: outboundDoneTasks
+          .filter(
+            (ot) =>
+              ot.productId === t.outputProductId &&
+              ot.warehouseId === t.warehouseId &&
+              ot.salesOrder.customerId === t.customerId &&
+              this.isSerialMatch(t.outputSerialNos, ot.serialNos),
+          )
+          .map((ot) => ({
+            id: ot.id,
+            taskType: ot.taskType,
+            status: ot.status,
+            qtyTask: ot.qtyTask.toString(),
+            qtyDone: ot.qtyDone.toString(),
+            completedAt: ot.completedAt,
+            serialNos: this.jsonToStringArray(ot.serialNos),
+            salesOrder: { id: ot.salesOrder.id, orderNo: ot.salesOrder.orderNo, status: ot.salesOrder.status },
+            wave: ot.wave ? { id: ot.wave.id, waveNo: ot.wave.waveNo } : null,
+          })),
+        inputs: mappedInputs,
+      };
+    });
+  }
+
+  /**
+   * Finalize (post) all DRAFT billing lines generated from process flow (transfer / transformation),
+   * scoped like other process-flow reads (warehouse + optional operator company).
+   */
+  async postDraftProcessFlowBilling(user?: JwtPayload) {
+    const warehouseIds = this.allowedWarehouseIds(user);
+    if (warehouseIds !== undefined && warehouseIds.length === 0) {
+      return { postedCount: 0 };
+    }
+    const where: Prisma.BillingTransactionWhereInput = {
+      status: BillingTransactionStatus.DRAFT,
+      referenceType: { in: ['INTERNAL_TRANSFER', 'MATERIAL_TRANSFORMATION'] },
+      ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}),
+      ...(user?.operatorCompanyId && !this.isSystemAdministrator(user)
+        ? { operatorCompanyId: user.operatorCompanyId }
+        : {}),
+    };
+    const result = await this.prisma.billingTransaction.updateMany({
+      where,
+      data: { status: BillingTransactionStatus.POSTED },
+    });
+    return { postedCount: result.count };
   }
 
   async billingSummary(user?: JwtPayload) {
@@ -321,6 +509,18 @@ export class ProcessFlowService {
       [dto.warehouseId],
       [dto.outputProductId, ...dto.inputs.map((i) => i.productId)],
     );
+    await this.assertUniqueOutputSerials(dto.customerId, dto.outputProductId, dto.outputSerialNos);
+    const outputQtyPrepared = await this.prepareProductQtyForProcess(
+      dto.customerId,
+      dto.outputProductId,
+      dto.outputUomId,
+      dto.qtyOutput,
+    );
+    const inputQtyPrepared = await Promise.all(
+      dto.inputs.map((i) =>
+        this.prepareProductQtyForProcess(dto.customerId, i.productId, i.uomId, i.qtyConsumed),
+      ),
+    );
 
     try {
       const created = await this.prisma.materialTransformation.create({
@@ -330,13 +530,31 @@ export class ProcessFlowService {
           warehouseId: dto.warehouseId,
           outputProductId: dto.outputProductId,
           outputBinId: dto.outputBinId,
-          qtyOutput: new Prisma.Decimal(dto.qtyOutput),
+          outputLotNo: dto.outputLotNo?.trim() || undefined,
+          outputBatchNo: dto.outputBatchNo?.trim() || undefined,
+          outputSerialNos:
+            dto.outputSerialNos && dto.outputSerialNos.length > 0
+              ? dto.outputSerialNos.map((s) => String(s).trim()).filter(Boolean)
+              : undefined,
+          outputUomId: outputQtyPrepared.uomId,
+          qtyOutputInput: outputQtyPrepared.qtyInput,
+          outputConversionFactor: outputQtyPrepared.conversionFactor,
+          qtyOutput: outputQtyPrepared.qtyBase,
           note: dto.note?.trim(),
           inputs: {
-            create: dto.inputs.map((i) => ({
+            create: dto.inputs.map((i, idx) => ({
               productId: i.productId,
               binId: i.binId,
-              qtyConsumed: new Prisma.Decimal(i.qtyConsumed),
+              lotNo: i.lotNo?.trim() || undefined,
+              batchNo: i.batchNo?.trim() || undefined,
+              serialNos:
+                i.serialNos && i.serialNos.length > 0
+                  ? i.serialNos.map((s) => String(s).trim()).filter(Boolean)
+                  : undefined,
+              uomId: inputQtyPrepared[idx].uomId,
+              qtyConsumedInput: inputQtyPrepared[idx].qtyInput,
+              conversionFactor: inputQtyPrepared[idx].conversionFactor,
+              qtyConsumed: inputQtyPrepared[idx].qtyBase,
             })),
           },
         },
@@ -345,7 +563,8 @@ export class ProcessFlowService {
           warehouse: true,
           outputProduct: true,
           outputBin: true,
-          inputs: { include: { product: true, bin: true } },
+          outputUom: true,
+          inputs: { include: { product: true, bin: true, uom: true } },
         },
       });
       await this.recordProcessFlowEvent(this.prisma, {
@@ -602,7 +821,7 @@ export class ProcessFlowService {
     }
     if (recipe.lines.length === 0) throw new BadRequestException('Recipe has no lines');
 
-    const inputBinMap = new Map(dto.inputBins.map((b) => [b.productId, b.binId]));
+    const inputBinMap = new Map(dto.inputBins.map((b) => [b.productId, b]));
     const missingBinProduct = recipe.lines.find((line) => !inputBinMap.has(line.productId));
     if (missingBinProduct) {
       throw new BadRequestException('Input bin mapping is required for all recipe materials');
@@ -613,13 +832,43 @@ export class ProcessFlowService {
       [dto.warehouseId],
       [recipe.outputProductId, ...recipe.lines.map((l) => l.productId)],
     );
+    await this.assertUniqueOutputSerials(recipe.customerId, recipe.outputProductId, dto.outputSerialNos);
+    const outputQtyPrepared = await this.prepareProductQtyForProcess(
+      recipe.customerId,
+      recipe.outputProductId,
+      dto.outputUomId,
+      dto.qtyOutput,
+    );
 
     const factor = new Prisma.Decimal(dto.qtyOutput).div(recipe.baseOutputQty);
-    const computedInputs = recipe.lines.map((line) => ({
-      productId: line.productId,
-      binId: inputBinMap.get(line.productId)!,
-      qtyConsumed: new Prisma.Decimal(line.qtyPerBase).mul(factor),
-    }));
+    const computedInputs = await Promise.all(
+      recipe.lines.map(async (line) => {
+        const consumedQty = new Prisma.Decimal(line.qtyPerBase).mul(factor);
+        const prepared = await this.prepareProductQtyForProcess(
+          recipe.customerId,
+          line.productId,
+          undefined,
+          Number(consumedQty),
+        );
+        return {
+          productId: line.productId,
+          binId: inputBinMap.get(line.productId)!.binId,
+          lotNo: inputBinMap.get(line.productId)?.lotNo?.trim() || undefined,
+          batchNo: inputBinMap.get(line.productId)?.batchNo?.trim() || undefined,
+          serialNos:
+            inputBinMap.get(line.productId)?.serialNos && inputBinMap.get(line.productId)!.serialNos!.length > 0
+              ? inputBinMap
+                  .get(line.productId)!
+                  .serialNos!.map((s) => String(s).trim())
+                  .filter(Boolean)
+              : undefined,
+          uomId: prepared.uomId,
+          qtyConsumedInput: prepared.qtyInput,
+          conversionFactor: prepared.conversionFactor,
+          qtyConsumed: prepared.qtyBase,
+        };
+      }),
+    );
 
     try {
       const created = await this.prisma.materialTransformation.create({
@@ -629,13 +878,28 @@ export class ProcessFlowService {
           warehouseId: dto.warehouseId,
           outputProductId: recipe.outputProductId,
           outputBinId: dto.outputBinId,
+          outputLotNo: dto.outputLotNo?.trim() || undefined,
+          outputBatchNo: dto.outputBatchNo?.trim() || undefined,
+          outputSerialNos:
+            dto.outputSerialNos && dto.outputSerialNos.length > 0
+              ? dto.outputSerialNos.map((s) => String(s).trim()).filter(Boolean)
+              : undefined,
           recipeId: recipe.id,
-          qtyOutput: new Prisma.Decimal(dto.qtyOutput),
+          outputUomId: outputQtyPrepared.uomId,
+          qtyOutputInput: outputQtyPrepared.qtyInput,
+          outputConversionFactor: outputQtyPrepared.conversionFactor,
+          qtyOutput: outputQtyPrepared.qtyBase,
           note: dto.note?.trim(),
           inputs: {
             create: computedInputs.map((i) => ({
               productId: i.productId,
               binId: i.binId,
+              lotNo: i.lotNo,
+              batchNo: i.batchNo,
+              serialNos: i.serialNos,
+              uomId: i.uomId,
+              qtyConsumedInput: i.qtyConsumedInput,
+              conversionFactor: i.conversionFactor,
               qtyConsumed: i.qtyConsumed,
             })),
           },
@@ -645,8 +909,9 @@ export class ProcessFlowService {
           warehouse: true,
           outputProduct: true,
           outputBin: true,
+          outputUom: true,
           recipe: { include: { lines: true } },
-          inputs: { include: { product: true, bin: true } },
+          inputs: { include: { product: true, bin: true, uom: true } },
         },
       });
       await this.recordProcessFlowEvent(this.prisma, {
@@ -666,6 +931,52 @@ export class ProcessFlowService {
       }
       throw err;
     }
+  }
+
+  private async prepareTransferLine(customerId: string, productId: string, uomId: string, qty: number) {
+    return this.prepareProductQtyForProcess(customerId, productId, uomId, qty);
+  }
+
+  private async prepareProductQtyForProcess(customerId: string, productId: string, uomId: string | undefined, qty: number) {
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId },
+      select: { id: true, customerId: true, baseUomId: true },
+    });
+    if (!product || product.customerId !== customerId) {
+      throw new BadRequestException('Product is invalid for transfer customer');
+    }
+    if (!product.baseUomId) {
+      throw new BadRequestException('Product base UOM is not configured');
+    }
+    const effectiveUomId = uomId?.trim() || product.baseUomId;
+    if (effectiveUomId === product.baseUomId) {
+      return {
+        uomId: product.baseUomId,
+        qtyInput: new Prisma.Decimal(qty),
+        conversionFactor: new Prisma.Decimal(1),
+        qtyBase: new Prisma.Decimal(qty),
+      };
+    }
+
+    const conversion = await this.prisma.productUomConversion.findFirst({
+      where: {
+        productId,
+        fromUomId: effectiveUomId,
+        toUomId: product.baseUomId,
+        isActive: true,
+      },
+      select: { factor: true },
+    });
+    if (!conversion) {
+      throw new BadRequestException('Missing active UOM conversion for selected product line');
+    }
+    const qtyBase = new Prisma.Decimal(qty).mul(conversion.factor);
+    return {
+      uomId: effectiveUomId,
+      qtyInput: new Prisma.Decimal(qty),
+      conversionFactor: conversion.factor,
+      qtyBase,
+    };
   }
 
   private isSystemAdministrator(user?: JwtPayload): boolean {
@@ -766,6 +1077,64 @@ export class ProcessFlowService {
     return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
   }
 
+  private jsonToStringArray(value: Prisma.JsonValue | null | undefined): string[] {
+    if (!Array.isArray(value)) return [];
+    return value.map((v) => String(v)).filter((v) => v.trim().length > 0);
+  }
+
+  private isSerialMatch(inputSerialsRaw: Prisma.JsonValue | null | undefined, receiptSerialsRaw: Prisma.JsonValue | null | undefined): boolean {
+    const inputSerials = this.jsonToStringArray(inputSerialsRaw);
+    if (inputSerials.length === 0) return true;
+    const receiptSerials = new Set(this.jsonToStringArray(receiptSerialsRaw));
+    return inputSerials.every((sn) => receiptSerials.has(sn));
+  }
+
+  private normalizeSerialNos(serialNos?: string[]): string[] {
+    if (!Array.isArray(serialNos)) return [];
+    const normalized = serialNos.map((s) => String(s).trim()).filter(Boolean);
+    return [...new Set(normalized)];
+  }
+
+  private async assertUniqueOutputSerials(customerId: string, productId: string, serialNos?: string[]) {
+    const normalized = this.normalizeSerialNos(serialNos);
+    if (normalized.length === 0) return;
+    const values = Prisma.join(normalized.map((s) => Prisma.sql`${s}`));
+    const duplicates = await this.prisma.$queryRaw<Array<{ serialNo: string }>>`
+      SELECT DISTINCT "serialNo" FROM (
+        SELECT sns.sn AS "serialNo"
+        FROM inbound_receipts ir
+        CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(ir.serial_nos, '[]'::jsonb)) AS sns(sn)
+        WHERE ir.customer_id = ${customerId}
+          AND ir.product_id = ${productId}
+          AND sns.sn IN (${values})
+
+        UNION
+
+        SELECT sns.sn AS "serialNo"
+        FROM material_transformations mt
+        CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(mt.output_serial_nos, '[]'::jsonb)) AS sns(sn)
+        WHERE mt.customer_id = ${customerId}
+          AND mt.output_product_id = ${productId}
+          AND sns.sn IN (${values})
+
+        UNION
+
+        SELECT sns.sn AS "serialNo"
+        FROM outbound_tasks ot
+        JOIN sales_orders so ON so.id = ot.sales_order_id
+        CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(ot.serial_nos, '[]'::jsonb)) AS sns(sn)
+        WHERE so.customer_id = ${customerId}
+          AND ot.product_id = ${productId}
+          AND ot.status = 'DONE'
+          AND sns.sn IN (${values})
+      ) d
+    `;
+    if (duplicates.length > 0) {
+      const sample = duplicates.map((d) => d.serialNo).slice(0, 5).join(', ');
+      throw new BadRequestException(`Output serial already used for this customer/product: ${sample}`);
+    }
+  }
+
   private async createProcessFlowBillingTransaction(
     tx: Prisma.TransactionClient,
     params: {
@@ -843,3 +1212,4 @@ export class ProcessFlowService {
     });
   }
 }
+

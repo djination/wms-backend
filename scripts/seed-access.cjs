@@ -41,8 +41,15 @@ async function main() {
   const mdZones = await upsertMenu('MD_ZONES', 'Zones', '/master-data/zones', 25, mdParent.id);
   const mdBins = await upsertMenu('MD_BINS', 'Bins', '/master-data/bins', 26, mdParent.id);
   const mdUoms = await upsertMenu('MD_UOMS', 'UOMs', '/master-data/uoms', 27, mdParent.id);
-  const mdSuppliers = await upsertMenu('MD_SUPPLIERS', 'Suppliers', '/master-data/suppliers', 28, mdParent.id);
-  const mdProducts = await upsertMenu('MD_PRODUCTS', 'Products', '/master-data/products', 29, mdParent.id);
+  const mdProductUomConversions = await upsertMenu(
+    'MD_PRODUCT_UOM_CONVERSIONS',
+    'Product UOM Conversions',
+    '/master-data/product-uom-conversions',
+    28,
+    mdParent.id,
+  );
+  const mdSuppliers = await upsertMenu('MD_SUPPLIERS', 'Suppliers', '/master-data/suppliers', 29, mdParent.id);
+  const mdProducts = await upsertMenu('MD_PRODUCTS', 'Products', '/master-data/products', 30, mdParent.id);
 
   const inboundParent = await upsertMenu('INBOUND', 'Inbound', '/inbound/asn', 30);
   const inAsn = await upsertMenu('INBOUND_ASN', 'ASN', '/inbound/asn', 31, inboundParent.id);
@@ -60,6 +67,13 @@ async function main() {
     'Material Transformations',
     '/process/transformations',
     39,
+    processParent.id,
+  );
+  const processActivity = await upsertMenu(
+    'PROCESS_ACTIVITY',
+    'Activity & billing',
+    '/process/activity',
+    40,
     processParent.id,
   );
 
@@ -98,12 +112,14 @@ async function main() {
     mdZones.id,
     mdBins.id,
     mdUoms.id,
+    mdProductUomConversions.id,
     inventoryParent.id,
     invBalance.id,
     processParent.id,
     processTransfers.id,
     processRecipes.id,
     processTransformations.id,
+    processActivity.id,
     inboundParent.id,
     inAsn.id,
     inReceiving.id,
@@ -143,8 +159,21 @@ async function main() {
   const passwordHash = await bcrypt.hash(ADMIN_PASSWORD, 10);
   const adminUser = await prisma.user.upsert({
     where: { email: ADMIN_EMAIL },
-    update: { name: ADMIN_NAME, passwordHash, isActive: true },
-    create: { email: ADMIN_EMAIL, name: ADMIN_NAME, passwordHash, isActive: true },
+    update: {
+      name: ADMIN_NAME,
+      passwordHash,
+      isActive: true,
+      canAccessWeb: true,
+      canAccessMobile: true,
+    },
+    create: {
+      email: ADMIN_EMAIL,
+      name: ADMIN_NAME,
+      passwordHash,
+      isActive: true,
+      canAccessWeb: true,
+      canAccessMobile: true,
+    },
   });
 
   await prisma.userRole.deleteMany({

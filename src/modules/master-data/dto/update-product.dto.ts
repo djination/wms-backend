@@ -14,6 +14,11 @@ export class UpdateProductDto {
   @MaxLength(120)
   name?: string;
 
+  @ApiPropertyOptional({ example: '6fe3afec-2be1-4937-bbab-2b3bfeeb9ddd' })
+  @IsOptional()
+  @IsUUID()
+  baseUomId?: string;
+
   @ApiPropertyOptional({ example: true })
   @IsOptional()
   @IsBoolean()

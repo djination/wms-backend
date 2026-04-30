@@ -2,6 +2,7 @@ import { ConflictException, Injectable, UnauthorizedException } from '@nestjs/co
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../prisma/prisma.service';
+import { LoginPlatform } from './dto/login.dto';
 import { JwtPayload } from './strategies/jwt.strategy';
 
 @Injectable()
@@ -21,11 +22,18 @@ export class AuthService {
     return this.issueTokens(user.id, user.email);
   }
 
-  async login(email: string, password: string) {
+  async login(email: string, password: string, platform: LoginPlatform = 'web') {
     const user = await this.prisma.user.findUnique({ where: { email } });
     if (!user) throw new UnauthorizedException('Invalid credentials');
     const ok = await bcrypt.compare(password, user.passwordHash);
     if (!ok) throw new UnauthorizedException('Invalid credentials');
+    if (!user.isActive) throw new UnauthorizedException('User is inactive');
+    if (platform === 'mobile' && !user.canAccessMobile) {
+      throw new UnauthorizedException('User has no mobile access');
+    }
+    if (platform === 'web' && !user.canAccessWeb) {
+      throw new UnauthorizedException('User has no web access');
+    }
     return this.issueTokens(user.id, user.email);
   }
 
@@ -35,6 +43,8 @@ export class AuthService {
         where: { id: sub },
         select: {
           operatorCompanyId: true,
+          canAccessWeb: true,
+          canAccessMobile: true,
           warehouseMappings: { select: { warehouseId: true } },
           userRoles: { select: { role: { select: { code: true } } } },
         },
@@ -45,6 +55,8 @@ export class AuthService {
           email,
           roles: userWithRoles?.userRoles.map((ur) => ur.role.code) ?? [],
           operatorCompanyId: userWithRoles?.operatorCompanyId ?? null,
+          canAccessWeb: userWithRoles?.canAccessWeb ?? false,
+          canAccessMobile: userWithRoles?.canAccessMobile ?? false,
           warehouseIds: userWithRoles?.warehouseMappings.map((m) => m.warehouseId) ?? [],
         };
         const accessToken = this.jwt.sign(payload);

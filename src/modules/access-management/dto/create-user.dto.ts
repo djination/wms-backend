@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsArray, IsEmail, IsOptional, IsString, IsUUID, MinLength } from 'class-validator';
+import { IsArray, IsBoolean, IsEmail, IsOptional, IsString, IsUUID, MinLength } from 'class-validator';
 
 export class CreateUserDto {
   @ApiProperty({ example: 'new.user@wms.local' })
@@ -32,4 +32,14 @@ export class CreateUserDto {
   @IsArray()
   @IsUUID(undefined, { each: true })
   warehouseIds?: string[];
+
+  @ApiPropertyOptional({ example: true, default: true })
+  @IsOptional()
+  @IsBoolean()
+  canAccessWeb?: boolean;
+
+  @ApiPropertyOptional({ example: false, default: false })
+  @IsOptional()
+  @IsBoolean()
+  canAccessMobile?: boolean;
 }

@@ -9,6 +9,8 @@ export type JwtPayload = {
   email: string;
   roles: string[];
   operatorCompanyId?: string | null;
+  canAccessWeb?: boolean;
+  canAccessMobile?: boolean;
   warehouseIds?: string[];
 };
 
@@ -36,6 +38,8 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
         email: true,
         isActive: true,
         operatorCompanyId: true,
+        canAccessWeb: true,
+        canAccessMobile: true,
         warehouseMappings: { select: { warehouseId: true } },
         userRoles: { select: { role: { select: { code: true } } } },
       },
@@ -48,6 +52,8 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       email: user.email,
       roles: user.userRoles.map((ur) => ur.role.code),
       operatorCompanyId: user.operatorCompanyId ?? null,
+      canAccessWeb: user.canAccessWeb,
+      canAccessMobile: user.canAccessMobile,
       warehouseIds: user.warehouseMappings.map((m) => m.warehouseId),
     };
   }

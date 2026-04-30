@@ -16,6 +16,11 @@ export class CreateProductDto {
   @MaxLength(120)
   name!: string;
 
+  @ApiPropertyOptional({ example: '6fe3afec-2be1-4937-bbab-2b3bfeeb9ddd' })
+  @IsOptional()
+  @IsUUID()
+  baseUomId?: string;
+
   @ApiPropertyOptional({ type: [String], example: ['6fe3afec-2be1-4937-bbab-2b3bfeeb9ddd'] })
   @IsOptional()
   @IsArray()

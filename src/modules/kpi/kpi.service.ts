@@ -3,6 +3,8 @@ import {
   BillingComponent,
   BillingTransactionStatus,
   InboundAsnStatus,
+  InternalTransferStatus,
+  MaterialTransformationStatus,
   OutboundTaskStatus,
   Prisma,
   SalesOrderStatus,
@@ -173,7 +175,7 @@ export class KpiService {
       occurredAt: { gte: from, lte: to },
     };
 
-    const [billingByStatus, billingByComponent] = await Promise.all([
+    const [billingByStatus, billingByComponent, completedTransfers, completedTransforms] = await Promise.all([
       this.prisma.billingTransaction.groupBy({
         by: ['status'],
         where: billingWhere,
@@ -186,7 +188,54 @@ export class KpiService {
         _sum: { amount: true },
         _count: { _all: true },
       }),
+      (() => {
+        const internalTransferWhere: Prisma.InternalTransferWhereInput = {
+          status: InternalTransferStatus.COMPLETED,
+          completedAt: { gte: from, lte: to },
+          ...(customerId ? { customerId } : {}),
+        };
+        if (warehouseId) {
+          internalTransferWhere.OR = [{ fromWarehouseId: warehouseId }, { toWarehouseId: warehouseId }];
+        } else if (allowedWarehouseIds !== undefined && allowedWarehouseIds.length > 0) {
+          internalTransferWhere.OR = [
+            { fromWarehouseId: { in: allowedWarehouseIds } },
+            { toWarehouseId: { in: allowedWarehouseIds } },
+          ];
+        }
+        return this.prisma.internalTransfer.findMany({
+          where: internalTransferWhere,
+          select: { lines: { select: { qty: true } } },
+        });
+      })(),
+      this.prisma.materialTransformation.findMany({
+        where: {
+          status: MaterialTransformationStatus.COMPLETED,
+          completedAt: { gte: from, lte: to },
+          ...(customerId ? { customerId } : {}),
+          ...warehouseScopeWhere,
+        },
+        select: { qtyOutput: true, inputs: { select: { qtyConsumed: true } } },
+      }),
     ]);
+
+    let transferQtyMoved = new Prisma.Decimal(0);
+    for (const t of completedTransfers) {
+      for (const line of t.lines) {
+        transferQtyMoved = transferQtyMoved.plus(line.qty);
+      }
+    }
+    let transformationOutputQty = new Prisma.Decimal(0);
+    let transformationInputQty = new Prisma.Decimal(0);
+    for (const t of completedTransforms) {
+      transformationOutputQty = transformationOutputQty.plus(t.qtyOutput);
+      for (const inp of t.inputs) {
+        transformationInputQty = transformationInputQty.plus(inp.qtyConsumed);
+      }
+    }
+    const kitchenYieldRatio =
+      transformationInputQty.greaterThan(0)
+        ? Number(transformationOutputQty.div(transformationInputQty).toFixed(6))
+        : null;
 
     const billingPosted = billingByStatus.find((b) => b.status === BillingTransactionStatus.POSTED);
     const billingDraft = billingByStatus.find((b) => b.status === BillingTransactionStatus.DRAFT);
@@ -237,6 +286,14 @@ export class KpiService {
           lines: row._count._all,
           amount: row._sum.amount?.toString() ?? '0',
         })),
+      },
+      processFlow: {
+        transfersCompletedInPeriod: completedTransfers.length,
+        transferQtyMovedInPeriod: transferQtyMoved.toString(),
+        transformationsCompletedInPeriod: completedTransforms.length,
+        transformationOutputQtyInPeriod: transformationOutputQty.toString(),
+        transformationInputQtyConsumedInPeriod: transformationInputQty.toString(),
+        kitchenYieldRatioOutputOverInput: kitchenYieldRatio,
       },
     };
   }
