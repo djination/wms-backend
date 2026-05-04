@@ -92,8 +92,20 @@ export class OutboundController {
     @CurrentUser() user: JwtPayload,
     @Query('salesOrderId') salesOrderId?: string,
     @Query('outboundTaskId') outboundTaskId?: string,
+    @Query('eventCode') eventCode?: string,
   ) {
-    return this.service.listEvents(user, salesOrderId, outboundTaskId);
+    return this.service.listEvents(user, salesOrderId, outboundTaskId, eventCode);
+  }
+
+  @Get('serial-reservations')
+  @ApiOperation({ summary: 'List outbound serial reservations for planning/task governance' })
+  listSerialReservations(
+    @CurrentUser() user: JwtPayload,
+    @Query('salesOrderId') salesOrderId?: string,
+    @Query('waveId') waveId?: string,
+    @Query('status') status?: string,
+  ) {
+    return this.service.listSerialReservations(user, salesOrderId, waveId, status);
   }
 
   @Get('allocations')

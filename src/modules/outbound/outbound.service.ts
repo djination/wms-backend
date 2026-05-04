@@ -1,7 +1,9 @@
-import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import {
   BillingComponent,
   BillingTransactionStatus,
+  OutboundSerialReservationStatus,
   OutboundTaskStatus,
   OutboundTaskType,
   Prisma,
@@ -9,6 +11,11 @@ import {
   WarehouseType,
 } from '@prisma/client';
 import { throwScopeForbidden } from '../../common/errors/scope-error';
+import {
+  effectiveQtyOnHandAfterCustomsHold,
+  mapInboundCustomsHeldQtyByBin,
+  sumInboundCustomsHeldQtyBase,
+} from '../../common/inventory/transit-customs-available.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../auth/strategies/jwt.strategy';
 import { CompleteOutboundTaskDto } from './dto/complete-outbound-task.dto';
@@ -22,7 +29,12 @@ import { UpdateWaveDto } from './dto/update-wave.dto';
 
 @Injectable()
 export class OutboundService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(OutboundService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly config: ConfigService,
+  ) {}
 
   private static readonly ALLOWED_STATUS_TRANSITIONS: Record<SalesOrderStatus, SalesOrderStatus[]> = {
     DRAFT: [SalesOrderStatus.RELEASED, SalesOrderStatus.CANCELLED],
@@ -250,6 +262,11 @@ export class OutboundService {
         where: { id: dto.salesOrderId },
         data: { status: order.status === SalesOrderStatus.RELEASED ? SalesOrderStatus.ALLOCATED : order.status },
       });
+      const serialReservation = await this.reserveSerialsForSalesOrder(this.prisma, {
+        salesOrderId: created.salesOrderId,
+        waveId: created.id,
+        operatorCompanyId: user?.operatorCompanyId,
+      });
       await this.recordOutboundEvent(this.prisma, {
         salesOrderId: dto.salesOrderId,
         warehouseId: order.warehouseId,
@@ -257,7 +274,15 @@ export class OutboundService {
         operatorCompanyId: user?.operatorCompanyId,
         eventCode: 'WAVE_CREATED',
         note: `Wave ${created.waveNo} created`,
-        metadata: { waveId: created.id, waveNo: created.waveNo },
+        metadata: {
+          waveId: created.id,
+          waveNo: created.waveNo,
+          serialReservation: {
+            reservedCount: serialReservation.reservedCount,
+            targetedCount: serialReservation.targetedCount,
+            unresolvedCount: serialReservation.unresolvedCount,
+          },
+        },
       });
       return created;
     } catch (err) {
@@ -306,7 +331,7 @@ export class OutboundService {
     });
   }
 
-  async listEvents(user?: JwtPayload, salesOrderId?: string, outboundTaskId?: string) {
+  async listEvents(user?: JwtPayload, salesOrderId?: string, outboundTaskId?: string, eventCode?: string) {
     const warehouseIds = this.allowedWarehouseIds(user);
     if (warehouseIds !== undefined && warehouseIds.length === 0) return [];
     return this.prisma.outboundEventLog.findMany({
@@ -314,6 +339,7 @@ export class OutboundService {
         ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}),
         ...(salesOrderId ? { salesOrderId } : {}),
         ...(outboundTaskId ? { outboundTaskId } : {}),
+        ...(eventCode ? { eventCode: eventCode.trim().toUpperCase() } : {}),
       },
       include: {
         salesOrder: { select: { id: true, orderNo: true, status: true } },
@@ -324,6 +350,29 @@ export class OutboundService {
       },
       orderBy: [{ createdAt: 'desc' }],
       take: 200,
+    });
+  }
+
+  async listSerialReservations(user?: JwtPayload, salesOrderId?: string, waveId?: string, status?: string) {
+    const warehouseIds = this.allowedWarehouseIds(user);
+    if (warehouseIds !== undefined && warehouseIds.length === 0) return [];
+    return this.prisma.outboundSerialReservation.findMany({
+      where: {
+        ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}),
+        ...(salesOrderId ? { salesOrderId } : {}),
+        ...(waveId ? { waveId } : {}),
+        ...(status ? { status: this.parseSerialReservationStatus(status) } : {}),
+      },
+      include: {
+        salesOrder: { select: { id: true, orderNo: true, status: true } },
+        salesOrderItem: { select: { id: true, qtyOrdered: true } },
+        wave: { select: { id: true, waveNo: true, plannedAt: true } },
+        outboundTask: { select: { id: true, taskType: true, status: true } },
+        product: { select: { id: true, sku: true, name: true } },
+        warehouse: { select: { id: true, code: true, name: true } },
+      },
+      orderBy: [{ reservedAt: 'desc' }],
+      take: 500,
     });
   }
 
@@ -392,6 +441,8 @@ export class OutboundService {
         order.customerId,
         item.productId,
         normalizedPlanSerials,
+        dto.salesOrderId,
+        dto.salesOrderItemId,
       );
 
       if (dto.waveId) {
@@ -412,6 +463,29 @@ export class OutboundService {
         if (!bin || !bin.isActive || bin.warehouseId !== order.warehouseId) {
           throw new BadRequestException('Source bin not found/inactive or out of order warehouse');
         }
+        const balance = await tx.inventoryBalance.findUnique({
+          where: {
+            customerId_warehouseId_binId_productId: {
+              customerId: order.customerId,
+              warehouseId: order.warehouseId,
+              binId: dto.sourceBinId,
+              productId: item.productId,
+            },
+          },
+        });
+        const onHand = balance ? new Prisma.Decimal(balance.qtyOnHand) : new Prisma.Decimal(0);
+        const held = await sumInboundCustomsHeldQtyBase(tx, {
+          customerId: order.customerId,
+          warehouseId: order.warehouseId,
+          binId: dto.sourceBinId,
+          productId: item.productId,
+        });
+        const available = effectiveQtyOnHandAfterCustomsHold(onHand, held);
+        if (available.lessThan(preparedTaskQty.qtyBase)) {
+          throw new BadRequestException(
+            'Insufficient available inventory at source bin for task quantity (inbound customs HELD reduces available qty in transit warehouse)',
+          );
+        }
       }
 
       const task = await tx.outboundTask.create({
@@ -431,6 +505,17 @@ export class OutboundService {
           assignedTo: dto.assignedTo?.trim(),
         },
       });
+      if (normalizedPlanSerials.length > 0) {
+        await tx.outboundSerialReservation.updateMany({
+          where: {
+            salesOrderItemId: dto.salesOrderItemId,
+            productId: item.productId,
+            serialNo: { in: normalizedPlanSerials },
+            status: OutboundSerialReservationStatus.ACTIVE,
+          },
+          data: { outboundTaskId: task.id },
+        });
+      }
 
       const nextStatus =
         dto.taskType === OutboundTaskType.PICKING
@@ -510,6 +595,8 @@ export class OutboundService {
         task.salesOrder.customerId,
         task.productId,
         effectiveSerials,
+        task.salesOrderId,
+        task.salesOrderItemId,
         task.id,
       );
 
@@ -524,6 +611,22 @@ export class OutboundService {
           completedAt: done ? new Date() : null,
         },
       });
+      if (effectiveSerials.length > 0) {
+        await tx.outboundSerialReservation.updateMany({
+          where: {
+            salesOrderId: task.salesOrderId,
+            salesOrderItemId: task.salesOrderItemId,
+            productId: task.productId,
+            serialNo: { in: effectiveSerials },
+            status: OutboundSerialReservationStatus.ACTIVE,
+          },
+          data: {
+            status: done ? OutboundSerialReservationStatus.CONSUMED : OutboundSerialReservationStatus.ACTIVE,
+            outboundTaskId: task.id,
+            consumedAt: done ? new Date() : null,
+          },
+        });
+      }
 
       if (task.taskType === OutboundTaskType.PICKING) {
         await tx.salesOrderItem.update({
@@ -645,6 +748,8 @@ export class OutboundService {
         task.salesOrder.customerId,
         task.productId,
         normalized,
+        undefined,
+        undefined,
         task.id,
       );
       nextSerialNos = normalized;
@@ -696,6 +801,15 @@ export class OutboundService {
         completedAt: null,
       },
     });
+    await this.prisma.outboundSerialReservation.updateMany({
+      where: { outboundTaskId: id, status: OutboundSerialReservationStatus.ACTIVE },
+      data: {
+        status: OutboundSerialReservationStatus.RELEASED,
+        releasedAt: new Date(),
+        releaseReason: 'TASK_CANCELLED',
+        outboundTaskId: null,
+      },
+    });
     return { success: true, mode: 'soft', id };
   }
 
@@ -705,6 +819,14 @@ export class OutboundService {
       return OutboundTaskStatus[normalized as keyof typeof OutboundTaskStatus];
     }
     throw new BadRequestException(`Invalid task status: ${status}`);
+  }
+
+  private parseSerialReservationStatus(status: string): OutboundSerialReservationStatus {
+    const normalized = status.trim().toUpperCase();
+    if (normalized in OutboundSerialReservationStatus) {
+      return OutboundSerialReservationStatus[normalized as keyof typeof OutboundSerialReservationStatus];
+    }
+    throw new BadRequestException(`Invalid serial reservation status: ${status}`);
   }
 
   private isSystemAdministrator(user?: JwtPayload): boolean {
@@ -788,6 +910,15 @@ export class OutboundService {
 
       if (reallocate) {
         await tx.outboundAllocation.deleteMany({ where: { salesOrderId: id } });
+        await tx.outboundSerialReservation.updateMany({
+          where: { salesOrderId: id, status: OutboundSerialReservationStatus.ACTIVE },
+          data: {
+            status: OutboundSerialReservationStatus.RELEASED,
+            releasedAt: new Date(),
+            releaseReason: 'REALLOCATE_REFRESH',
+            outboundTaskId: null,
+          },
+        });
       }
 
       const results: Array<{
@@ -797,6 +928,8 @@ export class OutboundService {
         qtyAllocated: string;
         isFullyAllocated: boolean;
       }> = [];
+
+      const inboundCustomsHoldBinIds = new Set<string>();
 
       for (const item of order.items) {
         const requestedQty = new Prisma.Decimal(item.qtyOrdered);
@@ -831,11 +964,23 @@ export class OutboundService {
           select: { binId: true, qtyOnHand: true },
         });
 
+        const heldByBin = await mapInboundCustomsHeldQtyByBin(tx, {
+          customerId: order.customerId,
+          warehouseId: order.warehouseId,
+          productId: item.productId,
+          binIds: balances.map((b) => b.binId),
+        });
+
         let allocatedThisRound = new Prisma.Decimal(0);
         for (const balance of balances) {
           if (remainingToAllocate.lte(0)) break;
           const onHandQty = new Prisma.Decimal(balance.qtyOnHand);
-          const allocQty = remainingToAllocate.lte(onHandQty) ? remainingToAllocate : onHandQty;
+          const heldQty = heldByBin.get(balance.binId) ?? new Prisma.Decimal(0);
+          if (heldQty.gt(0)) {
+            inboundCustomsHoldBinIds.add(balance.binId);
+          }
+          const effectiveOnHand = effectiveQtyOnHandAfterCustomsHold(onHandQty, heldQty);
+          const allocQty = remainingToAllocate.lte(effectiveOnHand) ? remainingToAllocate : effectiveOnHand;
           if (allocQty.lte(0)) continue;
           await tx.outboundAllocation.create({
             data: {
@@ -870,6 +1015,10 @@ export class OutboundService {
           status: allAllocated || partialAllocated ? SalesOrderStatus.ALLOCATED : order.status,
         },
       });
+      const serialReservation = await this.reserveSerialsForSalesOrder(tx, {
+        salesOrderId: order.id,
+        operatorCompanyId: user?.operatorCompanyId,
+      });
 
       await this.recordOutboundEvent(tx, {
         salesOrderId: order.id,
@@ -882,6 +1031,17 @@ export class OutboundService {
           allAllocated,
           itemCount: results.length,
           allocatedItemCount: results.filter((r) => new Prisma.Decimal(r.qtyAllocated).greaterThan(0)).length,
+          serialReservation: {
+            reservedCount: serialReservation.reservedCount,
+            targetedCount: serialReservation.targetedCount,
+            unresolvedCount: serialReservation.unresolvedCount,
+          },
+          ...(inboundCustomsHoldBinIds.size > 0
+            ? {
+                inboundCustomsHoldApplied: true,
+                inboundCustomsHoldBinIds: [...inboundCustomsHoldBinIds],
+              }
+            : {}),
         },
       });
 
@@ -971,11 +1131,180 @@ export class OutboundService {
     };
   }
 
+  private async reserveSerialsForSalesOrder(
+    tx: Prisma.TransactionClient | PrismaService,
+    params: { salesOrderId: string; waveId?: string; operatorCompanyId?: string | null },
+  ): Promise<{ reservedCount: number; targetedCount: number; unresolvedCount: number }> {
+    const order = await tx.salesOrder.findUnique({
+      where: { id: params.salesOrderId },
+      include: { items: true },
+    });
+    if (!order) throw new BadRequestException('Sales order not found');
+
+    let targetedCount = 0;
+    let reservedCount = 0;
+    for (const item of order.items) {
+      const targetCount = Math.floor(Number(item.qtyOrdered));
+      if (!Number.isFinite(targetCount) || targetCount <= 0) continue;
+      targetedCount += targetCount;
+
+      const existing = await tx.outboundSerialReservation.findMany({
+        where: {
+          salesOrderItemId: item.id,
+          productId: item.productId,
+          status: OutboundSerialReservationStatus.ACTIVE,
+        },
+        orderBy: [{ reservedAt: 'asc' }],
+        select: { id: true, serialNo: true },
+      });
+      if (existing.length > 0) {
+        if (params.waveId) {
+          await tx.outboundSerialReservation.updateMany({
+            where: { id: { in: existing.map((row) => row.id) } },
+            data: { waveId: params.waveId },
+          });
+        }
+        reservedCount += Math.min(existing.length, targetCount);
+      }
+
+      const missingCount = Math.max(0, targetCount - existing.length);
+      if (missingCount === 0) continue;
+
+      const takenRows = await tx.$queryRaw<Array<{ serialNo: string }>>`
+        SELECT DISTINCT serial_no AS "serialNo" FROM (
+          SELECT sns.sn AS serial_no
+          FROM outbound_tasks ot
+          JOIN sales_orders so ON so.id = ot.sales_order_id
+          CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(ot.serial_nos, '[]'::jsonb)) AS sns(sn)
+          WHERE so.customer_id = ${order.customerId}
+            AND ot.product_id = ${item.productId}
+            AND ot.status IN ('OPEN', 'IN_PROGRESS', 'DONE')
+
+          UNION
+
+          SELECT osr.serial_no
+          FROM outbound_serial_reservations osr
+          JOIN sales_orders so2 ON so2.id = osr.sales_order_id
+          WHERE so2.customer_id = ${order.customerId}
+            AND osr.product_id = ${item.productId}
+            AND osr.status = 'ACTIVE'
+        ) t
+      `;
+      const takenSerials = takenRows.map((row) => row.serialNo);
+      const traceRows =
+        takenSerials.length > 0
+          ? await tx.$queryRaw<Array<{ serialNo: string }>>`
+              SELECT DISTINCT serial_no AS "serialNo" FROM (
+                SELECT sns.sn AS serial_no
+                FROM inbound_receipts ir
+                CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(ir.serial_nos, '[]'::jsonb)) AS sns(sn)
+                WHERE ir.customer_id = ${order.customerId}
+                  AND ir.warehouse_id = ${order.warehouseId}
+                  AND ir.product_id = ${item.productId}
+
+                UNION
+
+                SELECT sns.sn AS serial_no
+                FROM material_transformations mt
+                CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(mt.output_serial_nos, '[]'::jsonb)) AS sns(sn)
+                WHERE mt.customer_id = ${order.customerId}
+                  AND mt.warehouse_id = ${order.warehouseId}
+                  AND mt.output_product_id = ${item.productId}
+              ) s
+              WHERE serial_no NOT IN (${Prisma.join(takenSerials.map((sn) => Prisma.sql`${sn}`))})
+              ORDER BY serial_no ASC
+              LIMIT ${missingCount}
+            `
+          : await tx.$queryRaw<Array<{ serialNo: string }>>`
+              SELECT DISTINCT serial_no AS "serialNo" FROM (
+                SELECT sns.sn AS serial_no
+                FROM inbound_receipts ir
+                CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(ir.serial_nos, '[]'::jsonb)) AS sns(sn)
+                WHERE ir.customer_id = ${order.customerId}
+                  AND ir.warehouse_id = ${order.warehouseId}
+                  AND ir.product_id = ${item.productId}
+
+                UNION
+
+                SELECT sns.sn AS serial_no
+                FROM material_transformations mt
+                CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(mt.output_serial_nos, '[]'::jsonb)) AS sns(sn)
+                WHERE mt.customer_id = ${order.customerId}
+                  AND mt.warehouse_id = ${order.warehouseId}
+                  AND mt.output_product_id = ${item.productId}
+              ) s
+              ORDER BY serial_no ASC
+              LIMIT ${missingCount}
+            `;
+      if (traceRows.length > 0) {
+        await tx.outboundSerialReservation.createMany({
+          data: traceRows.map((row) => ({
+            salesOrderId: order.id,
+            salesOrderItemId: item.id,
+            waveId: params.waveId,
+            customerId: order.customerId,
+            warehouseId: order.warehouseId,
+            productId: item.productId,
+            serialNo: row.serialNo,
+            status: OutboundSerialReservationStatus.ACTIVE,
+          })),
+          skipDuplicates: true,
+        });
+        reservedCount += traceRows.length;
+      }
+    }
+
+    const unresolvedCount = Math.max(0, targetedCount - reservedCount);
+    if (unresolvedCount > 0) {
+      await this.recordOutboundEvent(tx, {
+        salesOrderId: order.id,
+        warehouseId: order.warehouseId,
+        customerId: order.customerId,
+        operatorCompanyId: params.operatorCompanyId,
+        eventCode: 'SERIAL_RESERVATION_PARTIAL',
+        note: 'Unable to reserve all serials during pre-task planning',
+        metadata: { targetedCount, reservedCount, unresolvedCount, waveId: params.waveId ?? null },
+      });
+    }
+    return { targetedCount, reservedCount, unresolvedCount };
+  }
+
+  private async recordSerialConflictObservation(params: {
+    salesOrderId?: string;
+    customerId: string;
+    productId: string;
+    conflictType: string;
+    detail: string;
+  }) {
+    if (!params.salesOrderId) return;
+    const order = await this.prisma.salesOrder.findUnique({
+      where: { id: params.salesOrderId },
+      select: { id: true, warehouseId: true, customerId: true },
+    });
+    if (!order) return;
+    await this.prisma.outboundEventLog.create({
+      data: {
+        salesOrderId: order.id,
+        warehouseId: order.warehouseId,
+        customerId: order.customerId,
+        eventCode: 'SERIAL_CONFLICT_DETECTED',
+        note: params.conflictType,
+        metadata: {
+          productId: params.productId,
+          conflictType: params.conflictType,
+          detail: params.detail,
+        },
+      },
+    });
+  }
+
   private async assertReservableProductSerials(
     tx: Prisma.TransactionClient | PrismaService,
     customerId: string,
     productId: string,
     serialNos?: string[],
+    salesOrderIdForEvent?: string,
+    salesOrderItemIdForEvent?: string,
     excludeTaskId?: string,
   ) {
     const normalized = this.normalizeSerialNos(serialNos);
@@ -1018,12 +1347,49 @@ export class OutboundService {
         AND (${excludeTaskId ?? null} IS NULL OR ot.id <> ${excludeTaskId ?? null})
         AND sns.sn IN (${values})
     `;
+    const conflictingReservations = await tx.$queryRaw<
+      Array<{ serialNo: string; salesOrderId: string; orderNo: string | null; reservationStatus: string }>
+    >`
+      SELECT DISTINCT
+        osr.serial_no AS "serialNo",
+        osr.sales_order_id AS "salesOrderId",
+        so.order_no AS "orderNo",
+        osr.status::text AS "reservationStatus"
+      FROM outbound_serial_reservations osr
+      JOIN sales_orders so ON so.id = osr.sales_order_id
+      WHERE so.customer_id = ${customerId}
+        AND osr.product_id = ${productId}
+        AND osr.status = 'ACTIVE'
+        AND (${salesOrderItemIdForEvent ?? null} IS NULL OR osr.sales_order_item_id <> ${salesOrderItemIdForEvent ?? null})
+        AND osr.serial_no IN (${values})
+    `;
     if (conflictingTasks.length > 0) {
       const sample = conflictingTasks
         .slice(0, 3)
         .map((d) => `${d.serialNo}=>${d.orderNo ?? '-'}:${d.taskStatus}:${d.taskId.slice(0, 8)}`)
         .join(', ');
+      await this.recordSerialConflictObservation({
+        salesOrderId: salesOrderIdForEvent,
+        customerId,
+        productId,
+        conflictType: 'SERIAL_USED_IN_TASK',
+        detail: sample,
+      });
       throw new BadRequestException(`Serial already reserved/used for this customer/product (${sample})`);
+    }
+    if (conflictingReservations.length > 0) {
+      const sample = conflictingReservations
+        .slice(0, 3)
+        .map((d) => `${d.serialNo}=>${d.orderNo ?? '-'}:${d.reservationStatus}`)
+        .join(', ');
+      await this.recordSerialConflictObservation({
+        salesOrderId: salesOrderIdForEvent,
+        customerId,
+        productId,
+        conflictType: 'SERIAL_RESERVED_BY_OTHER_ORDER',
+        detail: sample,
+      });
+      throw new BadRequestException(`Serial already pre-reserved by another order (${sample})`);
     }
 
     const matched = new Set(traceRows.map((d) => d.serialNo));
@@ -1091,7 +1457,7 @@ export class OutboundService {
       metadata?: Prisma.JsonObject;
     },
   ) {
-    await tx.outboundEventLog.create({
+    const created = await tx.outboundEventLog.create({
       data: {
         salesOrderId: params.salesOrderId,
         outboundTaskId: params.outboundTaskId ?? null,
@@ -1103,5 +1469,56 @@ export class OutboundService {
         metadata: params.metadata,
       },
     });
+    if (params.eventCode === 'SERIAL_CONFLICT_DETECTED' || params.eventCode === 'SERIAL_RESERVATION_PARTIAL') {
+      await this.sendSerialGovernanceAlert(params, created.id);
+    }
+  }
+
+  private async sendSerialGovernanceAlert(
+    params: {
+      salesOrderId: string;
+      outboundTaskId?: string | null;
+      warehouseId: string;
+      customerId: string;
+      operatorCompanyId?: string | null;
+      eventCode: string;
+      note?: string;
+      metadata?: Prisma.JsonObject;
+    },
+    outboundEventId: string,
+  ) {
+    const webhookUrl = this.config.get<string>('INTEGRATION_ALERT_WEBHOOK_URL')?.trim();
+    if (!webhookUrl) return;
+    try {
+      const payload = {
+        source: 'wms-backend',
+        category: 'SERIAL_GOVERNANCE_ALERT',
+        outboundEventId,
+        eventCode: params.eventCode,
+        note: params.note ?? null,
+        occurredAt: new Date().toISOString(),
+        salesOrderId: params.salesOrderId,
+        outboundTaskId: params.outboundTaskId ?? null,
+        customerId: params.customerId,
+        warehouseId: params.warehouseId,
+        operatorCompanyId: params.operatorCompanyId ?? null,
+        metadata: params.metadata ?? null,
+      };
+      const response = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        this.logger.warn(
+          `Serial governance alert webhook responded ${response.status} for event ${params.eventCode} (${outboundEventId})`,
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+      this.logger.warn(`Failed to send serial governance alert webhook: ${message}`);
+    }
   }
 }
