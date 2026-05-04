@@ -5,6 +5,7 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { JwtPayload } from '../auth/strategies/jwt.strategy';
 import { CreateAsnDto } from './dto/create-asn.dto';
 import { ReceiveAsnItemDto } from './dto/receive-asn-item.dto';
+import { ReleaseInboundReceiptCustomsDto } from './dto/release-inbound-receipt-customs.dto';
 import { UpdateAsnDto } from './dto/update-asn.dto';
 import { UpdateAsnItemsDto } from './dto/update-asn-items.dto';
 import { InboundService } from './inbound.service';
@@ -50,5 +51,18 @@ export class InboundController {
   @ApiOperation({ summary: 'Receive ASN item into bin and update stock balance' })
   receive(@Body() dto: ReceiveAsnItemDto, @CurrentUser() user: JwtPayload) {
     return this.service.receiveItem(dto, user);
+  }
+
+  @Post('receipts/:id/customs-release')
+  @ApiOperation({
+    summary: 'Mark inbound receipt customs-cleared (HELD → CLEARED)',
+    description: 'Untuk receipt di gudang transit (status HELD). Stok outbound/transfer tetap dijaga di fase berikutnya.',
+  })
+  releaseReceiptCustoms(
+    @Param('id') id: string,
+    @Body() dto: ReleaseInboundReceiptCustomsDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.service.releaseInboundReceiptCustoms(id, dto, user);
   }
 }
