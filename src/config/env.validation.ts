@@ -26,5 +26,7 @@ export const validationSchema = Joi.object({
   AWS_SECRET_ACCESS_KEY: Joi.string().optional().allow(''),
   S3_ENDPOINT: Joi.string().optional(),
   INTEGRATION_WEBHOOK_SECRET: Joi.string().optional().allow(''),
+  // Key may exist in .env with empty value; optional() alone does not allow "".
+  INTEGRATION_ALERT_WEBHOOK_URL: Joi.string().uri().optional().allow(''),
   CORS_ORIGIN: Joi.string().optional(),
 });

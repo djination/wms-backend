@@ -134,6 +134,12 @@ enum OutboundTaskStatus {
   CANCELLED
 }
 
+enum OutboundSerialReservationStatus {
+  ACTIVE
+  CONSUMED
+  RELEASED
+}
+
 enum BillingComponent {
   STORAGE
   HANDLING
@@ -185,6 +191,7 @@ model Customer {
   billingTransactions BillingTransaction[]
   salesOrders SalesOrder[]
   outboundAllocations OutboundAllocation[]
+  outboundSerialReservations OutboundSerialReservation[]
   outboundEvents OutboundEventLog[]
   processFlowEvents ProcessFlowEventLog[]
   internalTransfers InternalTransfer[]
@@ -255,6 +262,7 @@ model Warehouse {
   outboundWaves     OutboundWave[]
   outboundTasks     OutboundTask[]
   outboundAllocations OutboundAllocation[]
+  outboundSerialReservations OutboundSerialReservation[]
   outboundEvents    OutboundEventLog[]
   processFlowEvents ProcessFlowEventLog[]
   transfersFrom     InternalTransfer[] @relation("TransferFromWarehouse")
@@ -407,6 +415,7 @@ model Product {
   salesOrderItems SalesOrderItem[]
   outboundTasks OutboundTask[]
   outboundAllocations OutboundAllocation[]
+  outboundSerialReservations OutboundSerialReservation[]
   transferLines InternalTransferLine[]
   transformationInputs MaterialTransformationInput[]
   transformationOutputs MaterialTransformation[] @relation("TransformationOutputProduct")
@@ -785,6 +794,7 @@ model SalesOrder {
   waves         OutboundWave[]
   tasks         OutboundTask[]
   allocations   OutboundAllocation[]
+  serialReservations OutboundSerialReservation[]
   eventLogs     OutboundEventLog[]
 
   @@index([customerId, status])
@@ -806,6 +816,7 @@ model SalesOrderItem {
   product      Product    @relation(fields: [productId], references: [id])
   tasks        OutboundTask[]
   allocations  OutboundAllocation[]
+  serialReservations OutboundSerialReservation[]
 
   @@unique([salesOrderId, productId])
   @@index([productId])
@@ -847,6 +858,7 @@ model OutboundWave {
   salesOrder   SalesOrder @relation(fields: [salesOrderId], references: [id])
   warehouse    Warehouse  @relation(fields: [warehouseId], references: [id])
   tasks        OutboundTask[]
+  serialReservations OutboundSerialReservation[]
 
   @@index([salesOrderId])
   @@index([warehouseId])
@@ -881,6 +893,7 @@ model OutboundTask {
   uom             UnitOfMeasure?     @relation(fields: [uomId], references: [id])
   sourceBin       WarehouseBin?      @relation("OutboundSourceBin", fields: [sourceBinId], references: [id])
   eventLogs       OutboundEventLog[]
+  serialReservations OutboundSerialReservation[]
 
   @@index([salesOrderId, taskType, status])
   @@index([salesOrderItemId])
@@ -914,6 +927,40 @@ model OutboundEventLog {
   @@index([warehouseId, createdAt])
   @@index([customerId, createdAt])
   @@map("outbound_event_logs")
+}
+
+model OutboundSerialReservation {
+  id                String                          @id @default(uuid())
+  salesOrderId      String                          @map("sales_order_id")
+  salesOrderItemId  String                          @map("sales_order_item_id")
+  waveId            String?                         @map("wave_id")
+  outboundTaskId    String?                         @map("outbound_task_id")
+  customerId        String                          @map("customer_id")
+  warehouseId       String                          @map("warehouse_id")
+  productId         String                          @map("product_id")
+  serialNo          String                          @map("serial_no")
+  status            OutboundSerialReservationStatus @default(ACTIVE)
+  reservedAt        DateTime                        @default(now()) @map("reserved_at")
+  consumedAt        DateTime?                       @map("consumed_at")
+  releasedAt        DateTime?                       @map("released_at")
+  releaseReason     String?                         @map("release_reason")
+  createdAt         DateTime                        @default(now()) @map("created_at")
+  updatedAt         DateTime                        @updatedAt @map("updated_at")
+  salesOrder        SalesOrder                      @relation(fields: [salesOrderId], references: [id])
+  salesOrderItem    SalesOrderItem                  @relation(fields: [salesOrderItemId], references: [id])
+  wave              OutboundWave?                   @relation(fields: [waveId], references: [id])
+  outboundTask      OutboundTask?                   @relation(fields: [outboundTaskId], references: [id])
+  customer          Customer                        @relation(fields: [customerId], references: [id])
+  warehouse         Warehouse                       @relation(fields: [warehouseId], references: [id])
+  product           Product                         @relation(fields: [productId], references: [id])
+
+  @@unique([customerId, productId, serialNo, status])
+  @@index([salesOrderId, salesOrderItemId, status])
+  @@index([waveId, status])
+  @@index([outboundTaskId, status])
+  @@index([warehouseId, productId, status])
+  @@index([customerId, createdAt])
+  @@map("outbound_serial_reservations")
 }
 
 model ProcessFlowEventLog {
