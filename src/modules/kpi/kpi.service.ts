@@ -3,6 +3,7 @@ import {
   BillingComponent,
   BillingTransactionStatus,
   InboundAsnStatus,
+  InboundReceiptCustomsClearanceStatus,
   InternalTransferStatus,
   MaterialTransformationStatus,
   OutboundTaskStatus,
@@ -240,6 +241,84 @@ export class KpiService {
     const billingPosted = billingByStatus.find((b) => b.status === BillingTransactionStatus.POSTED);
     const billingDraft = billingByStatus.find((b) => b.status === BillingTransactionStatus.DRAFT);
 
+    const transitWarehouseWhere: Prisma.WarehouseWhereInput = {
+      isTransitImportHub: true,
+      ...(warehouseId ? { id: warehouseId } : {}),
+      ...(allowedWarehouseIds !== undefined && !warehouseId && allowedWarehouseIds.length > 0
+        ? { id: { in: allowedWarehouseIds } }
+        : {}),
+    };
+    const transitReceiptBaseWhere: Prisma.InboundReceiptWhereInput = {
+      ...(customerId ? { customerId } : {}),
+      warehouse: transitWarehouseWhere,
+    };
+    const clearedInPeriodWhere: Prisma.InboundReceiptWhereInput = {
+      ...transitReceiptBaseWhere,
+      customsClearanceStatus: InboundReceiptCustomsClearanceStatus.CLEARED,
+      customsReleasedAt: { gte: from, lte: to },
+    };
+
+    const [
+      transitOpenHeldCount,
+      transitOpenHeldQtyAgg,
+      transitOpenHeldSamples,
+      transitClearedCount,
+      transitClearedQtyAgg,
+      transitClearedSamples,
+    ] = await Promise.all([
+      this.prisma.inboundReceipt.count({
+        where: { ...transitReceiptBaseWhere, customsClearanceStatus: InboundReceiptCustomsClearanceStatus.HELD },
+      }),
+      this.prisma.inboundReceipt.aggregate({
+        where: { ...transitReceiptBaseWhere, customsClearanceStatus: InboundReceiptCustomsClearanceStatus.HELD },
+        _sum: { qtyReceived: true },
+      }),
+      this.prisma.inboundReceipt.findMany({
+        where: { ...transitReceiptBaseWhere, customsClearanceStatus: InboundReceiptCustomsClearanceStatus.HELD },
+        select: { customsHoldStartedAt: true, receivedAt: true },
+        take: 5000,
+      }),
+      this.prisma.inboundReceipt.count({ where: clearedInPeriodWhere }),
+      this.prisma.inboundReceipt.aggregate({
+        where: clearedInPeriodWhere,
+        _sum: { qtyReceived: true },
+      }),
+      this.prisma.inboundReceipt.findMany({
+        where: clearedInPeriodWhere,
+        select: { customsHoldStartedAt: true, customsReleasedAt: true, receivedAt: true },
+        take: 10000,
+      }),
+    ]);
+
+    const nowMs = Date.now();
+    let openDwellMsSum = 0;
+    let openDwellN = 0;
+    for (const r of transitOpenHeldSamples) {
+      const startMs = (r.customsHoldStartedAt ?? r.receivedAt).getTime();
+      const span = nowMs - startMs;
+      if (span >= 0) {
+        openDwellMsSum += span;
+        openDwellN += 1;
+      }
+    }
+    const avgOpenDwellHours =
+      openDwellN > 0 ? Number((openDwellMsSum / openDwellN / 3600000).toFixed(4)) : null;
+
+    let clearedDwellMsSum = 0;
+    let clearedDwellN = 0;
+    for (const r of transitClearedSamples) {
+      const end = r.customsReleasedAt;
+      if (!end) continue;
+      const start = r.customsHoldStartedAt ?? r.receivedAt;
+      const span = end.getTime() - start.getTime();
+      if (span >= 0) {
+        clearedDwellMsSum += span;
+        clearedDwellN += 1;
+      }
+    }
+    const avgClearedDwellHours =
+      clearedDwellN > 0 ? Number((clearedDwellMsSum / clearedDwellN / 3600000).toFixed(4)) : null;
+
     return {
       period: { from: from.toISOString(), to: to.toISOString() },
       filters: { warehouseId: warehouseId ?? null, customerId: customerId ?? null },
@@ -294,6 +373,26 @@ export class KpiService {
         transformationOutputQtyInPeriod: transformationOutputQty.toString(),
         transformationInputQtyConsumedInPeriod: transformationInputQty.toString(),
         kitchenYieldRatioOutputOverInput: kitchenYieldRatio,
+      },
+      transitImportCustoms: {
+        openHeldReceiptCount: transitOpenHeldCount,
+        openHeldQtyBase: transitOpenHeldQtyAgg._sum.qtyReceived?.toString() ?? '0',
+        avgOpenDwellHours,
+        openDwellStatsBasis:
+          transitOpenHeldCount === 0
+            ? 'none'
+            : transitOpenHeldSamples.length < transitOpenHeldCount
+              ? 'sample_first_5000'
+              : 'all',
+        clearedInPeriodReceiptCount: transitClearedCount,
+        clearedInPeriodQtyBase: transitClearedQtyAgg._sum.qtyReceived?.toString() ?? '0',
+        avgClearedDwellHoursHoldToRelease: avgClearedDwellHours,
+        clearedDwellStatsBasis:
+          transitClearedCount === 0
+            ? 'none'
+            : transitClearedSamples.length < transitClearedCount
+              ? 'sample_first_10000'
+              : 'all',
       },
     };
   }

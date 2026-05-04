@@ -16,7 +16,7 @@ export class KpiController {
   @Get('summary')
   @ApiOperation({
     summary:
-      'Operational KPI snapshot: inbound accuracy proxy, outbound fulfillment, inventory utilization proxy, billing totals',
+      'Operational KPI snapshot: inbound, outbound, inventory, billing, process flow, plus transit-import customs dwell (open HELD + cleared in period)',
   })
   getSummary(@Query() query: KpiQueryDto, @CurrentUser() user: JwtPayload) {
     return this.service.getSummary(query, user);
