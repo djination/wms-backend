@@ -295,6 +295,16 @@ export class KpiService {
         transformationInputQtyConsumedInPeriod: transformationInputQty.toString(),
         kitchenYieldRatioOutputOverInput: kitchenYieldRatio,
       },
+      transitImportCustoms: {
+        openHeldReceiptCount: 0,
+        openHeldQtyBase: '0',
+        avgOpenDwellHours: null,
+        openDwellStatsBasis: 'none',
+        clearedInPeriodReceiptCount: 0,
+        clearedInPeriodQtyBase: '0',
+        avgClearedDwellHoursHoldToRelease: null,
+        clearedDwellStatsBasis: 'none',
+      },
     };
   }
 
