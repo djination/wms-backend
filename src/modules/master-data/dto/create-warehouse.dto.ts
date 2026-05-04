@@ -1,6 +1,6 @@
 import { WarehouseType } from '@prisma/client';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { ArrayUnique, IsArray, IsEnum, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
+import { ArrayUnique, IsArray, IsBoolean, IsEnum, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 
 export class CreateWarehouseDto {
   @ApiProperty({ example: 'WH-JKT-01' })
@@ -17,6 +17,14 @@ export class CreateWarehouseDto {
   @IsOptional()
   @IsEnum(WarehouseType)
   type?: WarehouseType;
+
+  @ApiPropertyOptional({
+    description: 'True jika gudang ini hub transit impor (dwell / customs release di fase berikutnya). Default false.',
+    default: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  isTransitImportHub?: boolean;
 
   @ApiProperty({ example: '0a2f9fce-2a37-4217-b731-2adea988b55f' })
   @IsUUID()

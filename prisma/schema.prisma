@@ -110,6 +110,12 @@ enum InboundAsnStatus {
   CANCELLED
 }
 
+enum InboundReceiptCustomsClearanceStatus {
+  NONE
+  HELD
+  CLEARED
+}
+
 enum SalesOrderStatus {
   DRAFT
   RELEASED
@@ -234,6 +240,8 @@ model Warehouse {
   code              String          @unique
   name              String
   type              WarehouseType   @default(SHARED)
+  /// Gudang titik transit impor (dwell / customs release). Ortogonal terhadap SHARED/DEDICATED; default false.
+  isTransitImportHub Boolean        @default(false) @map("is_transit_import_hub")
   phone             String?         @map("phone")
   address           String?         @map("address") @db.Text
   province          String?         @map("province")
@@ -757,6 +765,10 @@ model InboundReceipt {
   expiryDate     DateTime?      @map("expiry_date")
   note           String?
   receivedAt     DateTime       @default(now()) @map("received_at")
+  customsClearanceStatus InboundReceiptCustomsClearanceStatus @default(NONE) @map("customs_clearance_status")
+  customsHoldStartedAt   DateTime? @map("customs_hold_started_at")
+  customsReleasedAt      DateTime? @map("customs_released_at")
+  customsReleaseRef      String?   @map("customs_release_ref") @db.VarChar(255)
   createdAt      DateTime       @default(now()) @map("created_at")
   updatedAt      DateTime       @updatedAt @map("updated_at")
   inboundAsn     InboundAsn     @relation(fields: [inboundAsnId], references: [id])
@@ -773,6 +785,7 @@ model InboundReceipt {
   @@index([binId])
   @@index([productId])
   @@index([uomId])
+  @@index([customsClearanceStatus])
   @@map("inbound_receipts")
 }
 

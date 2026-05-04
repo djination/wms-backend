@@ -9,6 +9,10 @@ import {
   WarehouseType,
 } from '@prisma/client';
 import { throwScopeForbidden } from '../../common/errors/scope-error';
+import {
+  effectiveQtyOnHandAfterCustomsHold,
+  sumInboundCustomsHeldQtyBase,
+} from '../../common/inventory/transit-customs-available.util';
 import { JwtPayload } from '../auth/strategies/jwt.strategy';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateInternalTransferDto } from './dto/create-internal-transfer.dto';
@@ -144,8 +148,20 @@ export class ProcessFlowService {
           },
         });
         const qtyBase = line.qtyBase ?? line.qty;
-        if (!srcInv || new Prisma.Decimal(srcInv.qtyOnHand).lessThan(qtyBase)) {
+        if (!srcInv) {
           throw new BadRequestException('Insufficient source inventory for transfer');
+        }
+        const held = await sumInboundCustomsHeldQtyBase(tx, {
+          customerId: transfer.customerId,
+          warehouseId: transfer.fromWarehouseId,
+          binId: line.sourceBinId,
+          productId: line.productId,
+        });
+        const available = effectiveQtyOnHandAfterCustomsHold(new Prisma.Decimal(srcInv.qtyOnHand), held);
+        if (available.lessThan(qtyBase)) {
+          throw new BadRequestException(
+            'Insufficient available source inventory for transfer (inbound customs HELD reduces available qty in transit warehouse)',
+          );
         }
 
         await tx.inventoryBalance.update({
@@ -624,8 +640,20 @@ export class ProcessFlowService {
             },
           },
         });
-        if (!stock || new Prisma.Decimal(stock.qtyOnHand).lessThan(input.qtyConsumed)) {
+        if (!stock) {
           throw new BadRequestException('Insufficient inventory for one or more transformation inputs');
+        }
+        const held = await sumInboundCustomsHeldQtyBase(tx, {
+          customerId: process.customerId,
+          warehouseId: process.warehouseId,
+          binId: input.binId,
+          productId: input.productId,
+        });
+        const available = effectiveQtyOnHandAfterCustomsHold(new Prisma.Decimal(stock.qtyOnHand), held);
+        if (available.lessThan(input.qtyConsumed)) {
+          throw new BadRequestException(
+            'Insufficient available inventory for one or more transformation inputs (inbound customs HELD reduces available qty in transit warehouse)',
+          );
         }
 
         await tx.inventoryBalance.update({

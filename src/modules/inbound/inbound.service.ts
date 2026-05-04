@@ -1,5 +1,12 @@
-import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
-import { InboundAsnStatus, Prisma, WarehouseType } from '@prisma/client';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BillingComponent,
+  BillingTransactionStatus,
+  InboundAsnStatus,
+  InboundReceiptCustomsClearanceStatus,
+  Prisma,
+  WarehouseType,
+} from '@prisma/client';
 import { throwScopeForbidden } from '../../common/errors/scope-error';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../auth/strategies/jwt.strategy';
@@ -10,6 +17,9 @@ import { UpdateAsnItemsDto } from './dto/update-asn-items.dto';
 
 @Injectable()
 export class InboundService {
+  /** Draft billing: `STORAGE` + rate aktif per kontrak customer (opsional). */
+  static readonly TRANSIT_CUSTOMS_DWELL_ACTIVITY_CODE = 'TRANSIT_CUSTOMS_DWELL_DAY';
+
   constructor(private readonly prisma: PrismaService) {}
 
   async listAsns(user?: JwtPayload) {
@@ -30,6 +40,14 @@ export class InboundService {
             },
             supplier: true,
             uom: true,
+          },
+        },
+        receipts: {
+          orderBy: { receivedAt: 'desc' },
+          take: 25,
+          include: {
+            product: { select: { id: true, sku: true, name: true } },
+            bin: { select: { id: true, code: true, name: true } },
           },
         },
       },
@@ -179,6 +197,105 @@ export class InboundService {
     return { success: true, mode: 'soft', id };
   }
 
+  async releaseInboundReceiptCustoms(receiptId: string, dto: { releaseRef?: string }, user?: JwtPayload) {
+    return this.prisma.$transaction(async (tx) => {
+      const cur = await tx.inboundReceipt.findUnique({
+        where: { id: receiptId },
+        select: {
+          id: true,
+          customerId: true,
+          warehouseId: true,
+          customsClearanceStatus: true,
+          customsHoldStartedAt: true,
+          receivedAt: true,
+        },
+      });
+      if (!cur) {
+        throw new NotFoundException('Inbound receipt not found');
+      }
+      this.assertWarehouseAllowed(user, cur.warehouseId);
+      if (cur.customsClearanceStatus !== InboundReceiptCustomsClearanceStatus.HELD) {
+        throw new BadRequestException('Only receipts in HELD customs status can be released');
+      }
+      const now = new Date();
+      await tx.inboundReceipt.update({
+        where: { id: receiptId },
+        data: {
+          customsClearanceStatus: InboundReceiptCustomsClearanceStatus.CLEARED,
+          customsReleasedAt: now,
+          customsReleaseRef: dto.releaseRef?.trim() ? dto.releaseRef.trim() : null,
+        },
+      });
+      const holdStartedAt = cur.customsHoldStartedAt ?? cur.receivedAt;
+      await this.createTransitCustomsReleaseBillingTx(tx, {
+        receiptId: cur.id,
+        customerId: cur.customerId,
+        warehouseId: cur.warehouseId,
+        holdStartedAt,
+        releasedAt: now,
+        operatorCompanyId: user?.operatorCompanyId,
+      });
+      return tx.inboundReceipt.findUnique({
+        where: { id: receiptId },
+        include: {
+          product: { select: { id: true, sku: true, name: true } },
+          bin: { select: { id: true, code: true, name: true } },
+          inboundAsn: { select: { id: true, asnNo: true, warehouseId: true } },
+        },
+      });
+    });
+  }
+
+  private periodKeyFromDateUtc(date: Date): string {
+    return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+  }
+
+  private async createTransitCustomsReleaseBillingTx(
+    tx: Prisma.TransactionClient,
+    params: {
+      receiptId: string;
+      customerId: string;
+      warehouseId: string;
+      holdStartedAt: Date;
+      releasedAt: Date;
+      operatorCompanyId?: string | null;
+    },
+  ) {
+    const dwellMs = params.releasedAt.getTime() - params.holdStartedAt.getTime();
+    if (dwellMs <= 0) return;
+    const dwellDays = new Prisma.Decimal(dwellMs).div(new Prisma.Decimal(86400000));
+    const activeRate = await tx.billingRate.findFirst({
+      where: {
+        isActive: true,
+        activityCode: InboundService.TRANSIT_CUSTOMS_DWELL_ACTIVITY_CODE,
+        component: BillingComponent.STORAGE,
+        contract: { customerId: params.customerId, isActive: true },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { rate: true },
+    });
+    const rate = activeRate?.rate ?? new Prisma.Decimal(0);
+    const amount = dwellDays.mul(rate);
+    await tx.billingTransaction.create({
+      data: {
+        customerId: params.customerId,
+        warehouseId: params.warehouseId,
+        operatorCompanyId: params.operatorCompanyId ?? null,
+        component: BillingComponent.STORAGE,
+        activityCode: InboundService.TRANSIT_CUSTOMS_DWELL_ACTIVITY_CODE,
+        uom: 'DAY',
+        qty: dwellDays,
+        amount,
+        referenceType: 'INBOUND_RECEIPT',
+        referenceId: params.receiptId,
+        periodKey: this.periodKeyFromDateUtc(params.releasedAt),
+        status: BillingTransactionStatus.DRAFT,
+        occurredAt: params.releasedAt,
+        note: 'Transit customs dwell (hold → release); amount from STORAGE rate TRANSIT_CUSTOMS_DWELL_DAY if configured',
+      },
+    });
+  }
+
   async receiveItem(dto: ReceiveAsnItemDto, user?: JwtPayload) {
     if (dto.qtyReceived <= 0) {
       throw new BadRequestException('qtyReceived must be greater than zero');
@@ -197,6 +314,13 @@ export class InboundService {
 
       const item = asn.items.find((i) => i.productId === dto.productId && i.supplierId === dto.supplierId);
       if (!item) throw new BadRequestException('Product and supplier are not part of ASN');
+
+      const warehouse = await tx.warehouse.findUnique({
+        where: { id: asn.warehouseId },
+        select: { isTransitImportHub: true },
+      });
+      const transitHold = warehouse?.isTransitImportHub === true;
+      const holdStartedAt = transitHold ? new Date() : null;
 
       const bin = await tx.warehouseBin.findUnique({
         where: { id: dto.binId },
@@ -271,6 +395,10 @@ export class InboundService {
           serialNos: dto.serialNos && dto.serialNos.length > 0 ? dto.serialNos.map((s) => String(s).trim()).filter(Boolean) : undefined,
           expiryDate: dto.expiryDate ? new Date(dto.expiryDate) : undefined,
           note: dto.note?.trim(),
+          customsClearanceStatus: transitHold
+            ? InboundReceiptCustomsClearanceStatus.HELD
+            : InboundReceiptCustomsClearanceStatus.NONE,
+          customsHoldStartedAt: holdStartedAt,
         },
       });
 
@@ -292,7 +420,14 @@ export class InboundService {
           customer: true,
           warehouse: true,
           items: { include: { product: true, supplier: true, uom: true } },
-          receipts: { orderBy: { receivedAt: 'desc' }, take: 10 },
+          receipts: {
+            orderBy: { receivedAt: 'desc' },
+            take: 25,
+            include: {
+              product: { select: { id: true, sku: true, name: true } },
+              bin: { select: { id: true, code: true, name: true } },
+            },
+          },
         },
       });
     });
