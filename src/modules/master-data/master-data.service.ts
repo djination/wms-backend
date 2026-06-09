@@ -293,6 +293,7 @@ export class MasterDataService {
           name: dto.name.trim(),
           type: warehouseType,
           isTransitImportHub: dto.isTransitImportHub ?? false,
+          requireManifestReviewGate: dto.requireManifestReviewGate ?? false,
           phone: dto.phone?.trim() || null,
           address: dto.address?.trim() || null,
           province: dto.province?.trim() || null,
@@ -368,6 +369,7 @@ export class MasterDataService {
           name: dto.name?.trim(),
           type: dto.type,
           isTransitImportHub: dto.isTransitImportHub,
+          requireManifestReviewGate: dto.requireManifestReviewGate,
           phone: dto.phone !== undefined ? (dto.phone?.trim() || null) : undefined,
           address: dto.address !== undefined ? (dto.address?.trim() || null) : undefined,
           province: dto.province !== undefined ? (dto.province?.trim() || null) : undefined,
@@ -1001,7 +1003,16 @@ export class MasterDataService {
         customer: true,
         warehouse: true,
         bin: { include: { zone: true } },
-        product: true,
+        product: {
+          include: {
+            baseUom: true,
+            uomConversions: {
+              where: { isActive: true },
+              include: { fromUom: true, toUom: true },
+              orderBy: [{ createdAt: 'desc' }],
+            },
+          },
+        },
       },
       orderBy: [{ updatedAt: 'desc' }],
     });

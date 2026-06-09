@@ -5,6 +5,7 @@ import { AccessManagementModule } from './modules/access-management/access-manag
 import { AuthModule } from './modules/auth/auth.module';
 import { BillingModule } from './modules/billing/billing.module';
 import { HealthModule } from './modules/health/health.module';
+import { ImportConsignmentModule } from './modules/import-consignment/import-consignment.module';
 import { InboundModule } from './modules/inbound/inbound.module';
 import { IntegrationModule } from './modules/integration/integration.module';
 import { KpiModule } from './modules/kpi/kpi.module';
@@ -36,6 +37,7 @@ import { validationSchema } from './config/env.validation';
     UploadModule,
     IntegrationModule,
     MasterDataModule,
+    ImportConsignmentModule,
     InboundModule,
     OutboundModule,
     ProcessFlowModule,

@@ -15,6 +15,12 @@ const UOMS = [
   { code: 'GRAM', name: 'Gram', description: 'Satuan berat gram' },
   { code: 'LITER', name: 'Liter', description: 'Satuan volume liter' },
   { code: 'ML', name: 'Milliliter', description: 'Satuan volume mililiter' },
+  { code: 'DUS', name: 'Dus', description: 'Satuan volume dus' },
+  { code: 'BAL', name: 'Bal', description: 'Satuan volume bal' },
+  { code: 'PRS', name: 'Preset', description: 'Satuan volume preset' },
+  { code: 'BKS', name: 'Bungkus', description: 'Satuan volume bungkus' },
+  { code: 'BTG', name: 'Batang', description: 'Satuan volume batang' },
+  { code: 'ROLL', name: 'Roll', description: 'Satuan volume roll' },
 ];
 
 async function main() {

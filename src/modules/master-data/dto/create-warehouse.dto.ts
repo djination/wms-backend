@@ -26,6 +26,15 @@ export class CreateWarehouseDto {
   @IsBoolean()
   isTransitImportHub?: boolean;
 
+  @ApiPropertyOptional({
+    description:
+      'Jika true pada gudang transit impor: customs release receipt HELD hanya jika manifest MATCHED atau WAIVED untuk ASN yang terikat consignment.',
+    default: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  requireManifestReviewGate?: boolean;
+
   @ApiProperty({ example: '0a2f9fce-2a37-4217-b731-2adea988b55f' })
   @IsUUID()
   ownerCompanyId!: string;

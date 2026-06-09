@@ -35,11 +35,14 @@ export class CreateInternalTransferDto {
   @IsUUID()
   customerId!: string;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'Warehouse where stock is taken from (source bins must belong here)' })
   @IsUUID()
   fromWarehouseId!: string;
 
-  @ApiProperty()
+  @ApiProperty({
+    description:
+      'Warehouse where stock is placed. May equal fromWarehouseId for bin-to-bin / zone moves within the same building.',
+  })
   @IsUUID()
   toWarehouseId!: string;
 

@@ -8,6 +8,7 @@ import {
   WarehouseType,
 } from '@prisma/client';
 import { throwScopeForbidden } from '../../common/errors/scope-error';
+import { ImportConsignmentService } from '../import-consignment/import-consignment.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../auth/strategies/jwt.strategy';
 import { CreateAsnDto } from './dto/create-asn.dto';
@@ -20,7 +21,10 @@ export class InboundService {
   /** Draft billing: `STORAGE` + rate aktif per kontrak customer (opsional). */
   static readonly TRANSIT_CUSTOMS_DWELL_ACTIVITY_CODE = 'TRANSIT_CUSTOMS_DWELL_DAY';
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly importConsignmentService: ImportConsignmentService,
+  ) {}
 
   async listAsns(user?: JwtPayload) {
     const warehouseIds = this.allowedWarehouseIds(user);
@@ -46,8 +50,17 @@ export class InboundService {
           orderBy: { receivedAt: 'desc' },
           take: 25,
           include: {
-            product: { select: { id: true, sku: true, name: true } },
+            product: {
+              select: {
+                id: true,
+                sku: true,
+                name: true,
+                baseUomId: true,
+                baseUom: { select: { code: true, name: true } },
+              },
+            },
             bin: { select: { id: true, code: true, name: true } },
+            uom: { select: { id: true, code: true, name: true } },
           },
         },
       },
@@ -205,6 +218,7 @@ export class InboundService {
           id: true,
           customerId: true,
           warehouseId: true,
+          inboundAsnId: true,
           customsClearanceStatus: true,
           customsHoldStartedAt: true,
           receivedAt: true,
@@ -217,6 +231,10 @@ export class InboundService {
       if (cur.customsClearanceStatus !== InboundReceiptCustomsClearanceStatus.HELD) {
         throw new BadRequestException('Only receipts in HELD customs status can be released');
       }
+      await this.importConsignmentService.assertCustomsReleaseAllowedForReceipt(tx, {
+        warehouseId: cur.warehouseId,
+        inboundAsnId: cur.inboundAsnId,
+      });
       const now = new Date();
       await tx.inboundReceipt.update({
         where: { id: receiptId },
@@ -332,10 +350,13 @@ export class InboundService {
 
       const product = await tx.product.findUnique({
         where: { id: dto.productId },
-        select: { id: true, customerId: true, isActive: true },
+        select: { id: true, customerId: true, isActive: true, baseUomId: true },
       });
       if (!product || !product.isActive || product.customerId !== asn.customerId) {
         throw new BadRequestException('Product not found/inactive or does not belong to ASN customer');
+      }
+      if (!product.baseUomId) {
+        throw new BadRequestException('Product base UOM is not configured');
       }
 
       await this.assertUniqueProductSerials(
@@ -351,6 +372,15 @@ export class InboundService {
       if (nextQtyReceivedBase.greaterThan(item.qtyExpectedBase)) {
         throw new BadRequestException('Received quantity exceeds ASN expected quantity');
       }
+
+      const deltaInAsnLineUom = await this.baseQtyToAsnLineUomQty(
+        tx,
+        dto.productId,
+        product.baseUomId,
+        item.uomId,
+        qtyReceivedBase,
+      );
+      const nextQtyReceivedLine = new Prisma.Decimal(item.qtyReceived).plus(deltaInAsnLineUom);
 
       await tx.inventoryBalance.upsert({
         where: {
@@ -375,7 +405,7 @@ export class InboundService {
 
       await tx.inboundAsnItem.update({
         where: { id: item.id },
-        data: { qtyReceived: nextQtyReceivedBase, qtyReceivedBase: nextQtyReceivedBase },
+        data: { qtyReceived: nextQtyReceivedLine, qtyReceivedBase: nextQtyReceivedBase },
       });
 
       await tx.inboundReceipt.create({
@@ -424,8 +454,17 @@ export class InboundService {
             orderBy: { receivedAt: 'desc' },
             take: 25,
             include: {
-              product: { select: { id: true, sku: true, name: true } },
+              product: {
+                select: {
+                  id: true,
+                  sku: true,
+                  name: true,
+                  baseUomId: true,
+                  baseUom: { select: { code: true, name: true } },
+                },
+              },
               bin: { select: { id: true, code: true, name: true } },
+              uom: { select: { id: true, code: true, name: true } },
             },
           },
         },
@@ -606,6 +645,33 @@ export class InboundService {
     if (count !== uniqueIds.length) {
       throw new BadRequestException('One or more UOM are invalid or inactive');
     }
+  }
+
+  /**
+   * `qty_expected` / `qty_received` pada baris ASN memakai UOM baris; nilai basis di *_base.
+   * Konversi mengikuti master: qty_base = qty_line × factor (from line UOM → base).
+   */
+  private async baseQtyToAsnLineUomQty(
+    tx: PrismaService | Prisma.TransactionClient,
+    productId: string,
+    baseUomId: string,
+    asnLineUomId: string,
+    qtyBase: Prisma.Decimal,
+  ): Promise<Prisma.Decimal> {
+    if (asnLineUomId === baseUomId) return qtyBase;
+    const conversion = await tx.productUomConversion.findFirst({
+      where: {
+        productId,
+        fromUomId: asnLineUomId,
+        toUomId: baseUomId,
+        isActive: true,
+      },
+      select: { factor: true },
+    });
+    if (!conversion) {
+      throw new BadRequestException('Missing active UOM conversion from ASN line UOM to product base');
+    }
+    return qtyBase.div(conversion.factor);
   }
 
   private async prepareProductQtyForInbound(

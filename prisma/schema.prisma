@@ -21,6 +21,9 @@ model User {
   operatorCompany OperatorCompany? @relation(fields: [operatorCompanyId], references: [id])
   userRoles    UserRole[]
   warehouseMappings UserWarehouse[]
+  manifestReviewsReviewed ManifestReview[] @relation("ManifestReviewReviewedBy")
+  manifestReviewsWaived   ManifestReview[] @relation("ManifestReviewWaivedBy")
+  importConsignmentDocumentsUploaded ImportConsignmentDocument[]
 
   @@index([isActive])
   @@index([operatorCompanyId])
@@ -116,6 +119,31 @@ enum InboundReceiptCustomsClearanceStatus {
   CLEARED
 }
 
+enum ManifestReviewStatus {
+  DRAFT
+  IN_PROGRESS
+  MATCHED
+  DISCREPANCY
+  WAIVED
+}
+
+enum ManifestFindingCategory {
+  QTY
+  WEIGHT
+  DESCRIPTION
+  PARTY
+  DOC_MISSING
+  OTHER
+}
+
+enum ImportConsignmentDocType {
+  AWB
+  COMMERCIAL_INVOICE
+  PACKING_LIST
+  BL
+  OTHER
+}
+
 enum SalesOrderStatus {
   DRAFT
   RELEASED
@@ -204,6 +232,7 @@ model Customer {
   materialTransformations MaterialTransformation[]
   recipes      ProcessRecipe[]
   pics        CustomerPic[]
+  importConsignments ImportConsignment[]
 
   @@index([isActive])
   @@map("customers")
@@ -242,6 +271,8 @@ model Warehouse {
   type              WarehouseType   @default(SHARED)
   /// Gudang titik transit impor (dwell / customs release). Ortogonal terhadap SHARED/DEDICATED; default false.
   isTransitImportHub Boolean        @default(false) @map("is_transit_import_hub")
+  /// Jika true dan receipt HELD di hub transit: customs release wajib manifest MATCHED/WAIVED untuk ASN yang terikat consignment.
+  requireManifestReviewGate Boolean @default(false) @map("require_manifest_review_gate")
   phone             String?         @map("phone")
   address           String?         @map("address") @db.Text
   province          String?         @map("province")
@@ -277,6 +308,7 @@ model Warehouse {
   transfersTo       InternalTransfer[] @relation("TransferToWarehouse")
   transformations   MaterialTransformation[]
   userMappings      UserWarehouse[]
+  importConsignments ImportConsignment[]
 
   @@index([customerId])
   @@index([ownerCompanyId])
@@ -715,6 +747,7 @@ model InboundAsn {
   warehouse       Warehouse        @relation(fields: [warehouseId], references: [id])
   items           InboundAsnItem[]
   receipts        InboundReceipt[]
+  importConsignmentLinks ImportConsignmentAsn[]
 
   @@index([customerId])
   @@index([warehouseId])
@@ -787,6 +820,106 @@ model InboundReceipt {
   @@index([uomId])
   @@index([customsClearanceStatus])
   @@map("inbound_receipts")
+}
+
+/// Header kiriman impor (MAWB / konsolidasi) untuk manifest review bea cukai.
+model ImportConsignment {
+  id                  String   @id @default(uuid())
+  consignmentNo       String   @unique @map("consignment_no")
+  customerId          String   @map("customer_id")
+  warehouseId         String   @map("warehouse_id")
+  masterRef           String?  @map("master_ref") @db.VarChar(120)
+  awbMawb             String?  @map("awb_mawb") @db.VarChar(64)
+  awbHawb             String?  @map("awb_hawb") @db.VarChar(64)
+  awbCarrier          String?  @map("awb_carrier") @db.VarChar(120)
+  awbFlight           String?  @map("awb_flight") @db.VarChar(120)
+  awbOrigin           String?  @map("awb_origin") @db.VarChar(16)
+  awbDestination      String?  @map("awb_destination") @db.VarChar(16)
+  awbShipper          String?  @map("awb_shipper") @db.VarChar(255)
+  awbConsignee        String?  @map("awb_consignee") @db.VarChar(255)
+  awbPieces           Int?     @map("awb_pieces")
+  awbGrossWeightKg    Decimal? @map("awb_gross_weight_kg") @db.Decimal(18, 4)
+  awbChargeableWeightKg Decimal? @map("awb_chargeable_weight_kg") @db.Decimal(18, 4)
+  awbNatureOfGoods    String?  @map("awb_nature_of_goods") @db.VarChar(500)
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  customer   Customer @relation(fields: [customerId], references: [id])
+  warehouse  Warehouse @relation(fields: [warehouseId], references: [id])
+  asnLinks   ImportConsignmentAsn[]
+  manifestReview ManifestReview?
+  documents  ImportConsignmentDocument[]
+
+  @@index([customerId])
+  @@index([warehouseId])
+  @@map("import_consignments")
+}
+
+model ImportConsignmentDocument {
+  id                   String                   @id @default(uuid())
+  importConsignmentId  String                   @map("import_consignment_id")
+  docType              ImportConsignmentDocType @map("doc_type")
+  originalFileName     String                   @map("original_file_name") @db.VarChar(500)
+  storageKey           String                   @map("storage_key") @db.VarChar(500)
+  contentType          String?                  @map("content_type") @db.VarChar(120)
+  uploadedById         String?                  @map("uploaded_by_id")
+  createdAt            DateTime                 @default(now()) @map("created_at")
+
+  importConsignment ImportConsignment @relation(fields: [importConsignmentId], references: [id], onDelete: Cascade)
+  uploadedBy        User?             @relation(fields: [uploadedById], references: [id])
+
+  @@index([importConsignmentId])
+  @@map("import_consignment_documents")
+}
+
+model ImportConsignmentAsn {
+  importConsignmentId String @map("import_consignment_id")
+  inboundAsnId        String @map("inbound_asn_id")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  importConsignment ImportConsignment @relation(fields: [importConsignmentId], references: [id], onDelete: Cascade)
+  inboundAsn        InboundAsn       @relation(fields: [inboundAsnId], references: [id], onDelete: Cascade)
+
+  @@id([importConsignmentId, inboundAsnId])
+  @@unique([inboundAsnId])
+  @@index([inboundAsnId])
+  @@map("import_consignment_asns")
+}
+
+model ManifestReview {
+  id                    String               @id @default(uuid())
+  importConsignmentId   String               @unique @map("import_consignment_id")
+  status                ManifestReviewStatus @default(DRAFT)
+  notes                 String?              @db.Text
+  reviewedAt            DateTime?            @map("reviewed_at")
+  reviewedById          String?              @map("reviewed_by_id")
+  waivedReason          String?              @map("waived_reason") @db.Text
+  waivedAt              DateTime?            @map("waived_at")
+  waivedById            String?              @map("waived_by_id")
+  createdAt             DateTime             @default(now()) @map("created_at")
+  updatedAt             DateTime             @updatedAt @map("updated_at")
+
+  importConsignment ImportConsignment @relation(fields: [importConsignmentId], references: [id], onDelete: Cascade)
+  reviewedBy        User?             @relation("ManifestReviewReviewedBy", fields: [reviewedById], references: [id])
+  waivedBy          User?             @relation("ManifestReviewWaivedBy", fields: [waivedById], references: [id])
+  findings          ManifestReviewFinding[]
+
+  @@index([status])
+  @@map("manifest_reviews")
+}
+
+model ManifestReviewFinding {
+  id               String                 @id @default(uuid())
+  manifestReviewId String                 @map("manifest_review_id")
+  category         ManifestFindingCategory
+  message          String                 @db.Text
+  sortOrder        Int                    @default(0) @map("sort_order")
+  createdAt        DateTime               @default(now()) @map("created_at")
+
+  manifestReview ManifestReview @relation(fields: [manifestReviewId], references: [id], onDelete: Cascade)
+
+  @@index([manifestReviewId])
+  @@map("manifest_review_findings")
 }
 
 model SalesOrder {

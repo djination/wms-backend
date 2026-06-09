@@ -39,7 +39,14 @@ export class ProcessFlowService {
         customer: true,
         fromWarehouse: true,
         toWarehouse: true,
-        lines: { include: { product: true, sourceBin: true, destinationBin: true, uom: true } },
+        lines: {
+          include: {
+            product: true,
+            sourceBin: { include: { zone: true } },
+            destinationBin: { include: { zone: true } },
+            uom: true,
+          },
+        },
       },
       orderBy: [{ createdAt: 'desc' }],
     });
@@ -47,8 +54,10 @@ export class ProcessFlowService {
 
   async createTransfer(dto: CreateInternalTransferDto, user?: JwtPayload) {
     if (dto.lines.length === 0) throw new BadRequestException('Transfer lines cannot be empty');
-    if (dto.fromWarehouseId === dto.toWarehouseId) {
-      throw new BadRequestException('From warehouse and to warehouse cannot be the same');
+    for (const line of dto.lines) {
+      if (line.sourceBinId === line.destinationBinId) {
+        throw new BadRequestException('Source bin and destination bin must differ on each transfer line');
+      }
     }
     this.assertWarehouseAllowed(user, dto.fromWarehouseId);
     this.assertWarehouseAllowed(user, dto.toWarehouseId);
@@ -87,7 +96,14 @@ export class ProcessFlowService {
           customer: true,
           fromWarehouse: true,
           toWarehouse: true,
-          lines: { include: { product: true, sourceBin: true, destinationBin: true, uom: true } },
+          lines: {
+            include: {
+              product: true,
+              sourceBin: { include: { zone: true } },
+              destinationBin: { include: { zone: true } },
+              uom: true,
+            },
+          },
         },
       });
       await this.recordProcessFlowEvent(this.prisma, {
@@ -122,6 +138,9 @@ export class ProcessFlowService {
       }
 
       for (const line of transfer.lines) {
+        if (line.sourceBinId === line.destinationBinId) {
+          throw new BadRequestException('Source bin and destination bin must differ on each transfer line');
+        }
         const sourceBin = await tx.warehouseBin.findUnique({
           where: { id: line.sourceBinId },
           select: { warehouseId: true, isActive: true },
@@ -220,7 +239,14 @@ export class ProcessFlowService {
           customer: true,
           fromWarehouse: true,
           toWarehouse: true,
-          lines: { include: { product: true, sourceBin: true, destinationBin: true, uom: true } },
+          lines: {
+            include: {
+              product: true,
+              sourceBin: { include: { zone: true } },
+              destinationBin: { include: { zone: true } },
+              uom: true,
+            },
+          },
         },
       });
       await this.recordProcessFlowEvent(tx, {
