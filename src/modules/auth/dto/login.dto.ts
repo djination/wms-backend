@@ -19,4 +19,12 @@ export class LoginDto {
   @IsString()
   @IsIn(LOGIN_PLATFORM_VALUES)
   platform?: LoginPlatform;
+
+  @ApiPropertyOptional({
+    example: 'demo',
+    description: 'Optional if X-Tenant-Slug header or TENANT_DEFAULT_SLUG is set',
+  })
+  @IsOptional()
+  @IsString()
+  tenantSlug?: string;
 }

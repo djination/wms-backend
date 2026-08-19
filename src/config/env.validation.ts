@@ -29,4 +29,13 @@ export const validationSchema = Joi.object({
   // Key may exist in .env with empty value; optional() alone does not allow "".
   INTEGRATION_ALERT_WEBHOOK_URL: Joi.string().uri().optional().allow(''),
   CORS_ORIGIN: Joi.string().optional(),
+  SAAS_TENANT_REQUIRED: Joi.string().valid('true', 'false', '1', '0').optional(),
+  TENANT_DEFAULT_SLUG: Joi.string().optional(),
+  TENANT_BASE_DOMAIN: Joi.string().optional(),
+  PLATFORM_JWT_SECRET: Joi.string().min(16).optional(),
+  PLATFORM_JWT_EXPIRES_IN: Joi.string().optional(),
+  PLATFORM_IMPERSONATION_EXPIRES_IN: Joi.string().optional(),
+  TENANT_SIGNUP_ENABLED: Joi.string().valid('true', 'false', '1', '0').optional(),
+  SIGNUP_DEFAULT_PLAN_CODE: Joi.string().optional(),
+  AUTH_ALLOW_OPEN_REGISTER: Joi.string().valid('true', 'false', '1', '0').optional(),
 });

@@ -13,6 +13,12 @@ import { MasterDataModule } from './modules/master-data/master-data.module';
 import { MessagingModule } from './modules/messaging/messaging.module';
 import { OutboundModule } from './modules/outbound/outbound.module';
 import { ProcessFlowModule } from './modules/process-flow/process-flow.module';
+import { ProvisioningModule } from './modules/provisioning/provisioning.module';
+import { TenantContextModule } from './modules/tenant-context/tenant-context.module';
+import { TenantSignupModule } from './modules/tenant-signup/tenant-signup.module';
+import { PlatformPrismaModule } from './modules/platform-prisma/platform-prisma.module';
+import { PlatformModule } from './modules/platform/platform.module';
+import { PlatformRegistryModule } from './modules/platform-registry/platform-registry.module';
 import { PrismaModule } from './modules/prisma/prisma.module';
 import { RedisModule } from './modules/redis/redis.module';
 import { StorageModule } from './modules/storage/storage.module';
@@ -27,6 +33,12 @@ import { validationSchema } from './config/env.validation';
       validationSchema,
     }),
     PrismaModule,
+    PlatformPrismaModule,
+    PlatformRegistryModule,
+    PlatformModule,
+    ProvisioningModule,
+    TenantContextModule,
+    TenantSignupModule,
     RedisModule,
     MessagingModule,
     StorageModule,
